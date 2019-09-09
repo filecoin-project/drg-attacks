@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
-use crate::graph::Edge;
-use crate::graph::Graph;
+use crate::graph::{DRGAlgo, Graph, Edge};
 use crate::utils;
 
 #[derive(Debug)]
@@ -308,6 +307,9 @@ mod test {
     use super::*;
     use std::iter::FromIterator;
 
+    static TEST_SIZE: usize = 20;
+    static TEST_MAX_PATH_LENGTH: usize = TEST_SIZE / 5;
+
     // graph 0->1->2->3->4->5->6->7
     // + 0->2 , 2->4, 4->6
 
@@ -432,6 +434,45 @@ mod test {
         let (counts, topk) = count_paths(&graph, &s, target_length, k);
         assert_eq!(counts, vec![3, 3, 3, 3, 0, 0]);
         assert_eq!(topk, vec![Pair(3, 3), Pair(2, 3), Pair(1, 3)]);
+    }
+
+    #[test]
+    fn test_count_regular_connections() {
+        let seed = [1; 32];
+        // FIXME: Dummy seed, not used in `KConnector`, shouldn't be
+        //  mandatory to provide it for graph construction (it should
+        //  be part of the algorithm).
+
+        for k in 1..TEST_SIZE {
+            // When the `k` is to big stop. At least the center node
+            // should see at both sides (`TEST_SIZE / 2`) paths of the
+            // target length using any of the `k` connections, even
+            // the longest one (of a distance of `k` nodes), so the
+            // longest path overall should accommodate `k * length` nodes.
+            if TEST_SIZE/2 < k * TEST_MAX_PATH_LENGTH {
+                break;
+            }
+
+            let g = Graph::new(TEST_SIZE, seed, DRGAlgo::KConnector(k));
+
+            for length in 1..TEST_MAX_PATH_LENGTH {
+                // The number of incident paths for the center node should be:
+                // * Searching for a single length at one side of the node,
+                //   `k^length`, since at any node that we arrive there be `k`
+                //   new paths to discover.
+                // * Splitting that length to both sides, we should still find
+                //   that `k^partial_length` paths (which are joined multiplying
+                //   them and reaching the `k^length` total), and we can divide
+                //   the length in two in `length + 1` different ways (a length
+                //   of zero on one side is valid, it means we look for the path
+                //   in only one direction).
+                let expected_count = k.pow(length as u32) * (length + 1);
+
+                let (count, _) = count_paths(&g, &mut HashSet::new(), length, 1);
+                assert_eq!(count[g.size() / 2], expected_count);
+                // FIXME: Extend the check for more nodes in the center of the graph.
+            }
+        }
     }
 
     #[test]
