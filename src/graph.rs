@@ -1,5 +1,6 @@
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
+use std::cmp::max;
 use std::collections::HashSet;
 use std::hash::Hash;
 
@@ -40,7 +41,7 @@ pub struct Edge {
 
 impl Edge {
     pub fn new(parent: Node, child: Node) -> Edge {
-        debug_assert!(parent < child);
+        debug_assert!(parent < child, format!("the parent {} is not smaller than child {}", parent, child));
         Edge {
             parent,
             child,
@@ -56,6 +57,12 @@ pub enum DRGAlgo {
     BucketSample,
     // MetaBucket is the meta-graph construction with a specified degree
     MetaBucket(usize),
+    /// Each node is connected to the `k` closest neighbors (including immediate
+    /// predecessor). The objective is to have a guaranteed in/out-degree of `k`
+    /// for each node (except for the nodes at the edges), the fact that we choose
+    /// the *closest* ones is just to guarantee that with a regular topology. This
+    /// algorithm is mostly for testing purposes.
+    KConnector(usize),
 }
 
 impl Graph {
@@ -72,6 +79,7 @@ impl Graph {
         match g.algo {
             DRGAlgo::BucketSample => g.bucket_sample(),
             DRGAlgo::MetaBucket(degree) => g.meta_bucket(degree),
+            DRGAlgo::KConnector(k) => g.connect_neighbors(k),
         }
         g
     }
@@ -249,6 +257,25 @@ impl Graph {
         }
     }
 
+    /// Connect to `k` closest neighbors (see `KConnector`).
+    fn connect_neighbors(&mut self, k: usize) {
+        // FIXME: Let the algorithms initialize the slices instead of working
+        //  only with vectors.
+        // let parents = vec![vec![]; self.size()];
+        // FIXME: How to set the capacity for the inner empty vector to `k`?
+
+        debug_assert!(k > 0, format!("k {} is too small", k));
+
+        // Check that the graph is big enough to accommodate k connections
+        // at least in the center
+        debug_assert!(self.size() - 2 * k > 0, format!("the graph of size {} is too small for a k {}", self.size(), k));
+
+        for node in 0..self.size() {
+            let smallest_parent = max(node as isize - k as isize, 0) as usize;
+            self.parents.push((smallest_parent..node).collect());
+        }
+    }
+
     // children_project returns the children edges denoted by this graph
     // instead of using the parent relationship.
     // If j = array[i][u] (for any u), then there is an edge (i -> j) in the graph.
@@ -307,6 +334,28 @@ impl Graph {
     pub fn cap(&self) -> usize {
         self.parents.len()
     }
+
+    /// Convert the graph to a matrix where an `X` signals an edge
+    /// connecting a parent row to a child column
+    // FIXME: Decide the width based on the `size()` instead
+    //  of hard-coding it here to a big number (3).
+    pub fn to_str_matrix(&self) -> String {
+        let mut matrix = String::new();
+        matrix += "\n";
+        matrix += format!("{: >3}", "").as_str();
+        for col in 0..self.size() {
+            matrix += format!("{: >3}", col).as_str();
+        }
+        matrix += "\n";
+        for row in 0..self.size() {
+            matrix += format!("{: >3}", row).as_str();
+            for col in 0..self.size() {
+                matrix += format!("{: >3}", if self.parents[col].contains(&row) { "X" } else {""}).as_str();
+            }
+            matrix += "\n";
+        }
+        matrix
+    }
 }
 
 impl fmt::Display for Graph {
@@ -315,6 +364,7 @@ impl fmt::Display for Graph {
         match self.algo {
             DRGAlgo::BucketSample => write!(f, "bucket, ")?,
             DRGAlgo::MetaBucket(d) => write!(f, "meta-bucket (degree {}), ", d)?,
+            DRGAlgo::KConnector(k) => write!(f, "{}-connect, ", k)?,
         }
         write!(f, "parents: {:?}", self.parents)
     }
