@@ -235,7 +235,7 @@ impl Graph {
                         // in the same bucket!
                         let max = std::cmp::min(meta_idx, 1 << i);
                         assert!(max <= meta_idx);
-                        let meta_parent = rng.gen_range(min, max);
+                        let meta_parent = meta_idx - rng.gen_range(min, max);
                         let real_parent = meta_parent / degree;
                         assert!(meta_parent < meta_idx);
                         assert!(real_parent < node);
