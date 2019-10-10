@@ -80,6 +80,22 @@ pub enum DRGAlgo {
     KConnector(usize),
 }
 
+/// Range used for a uniform distribution sample in `Rng::gen_range`: `[low, high)`.
+#[derive(Debug)]
+pub struct UniformSampleRange {
+    low: usize,
+    high: usize,
+}
+
+/// Ranges used for random sample of a generated parent. The `bucket` range is
+/// deterministic, it only depends on the meta node, while the `node` range is
+/// not, it depends on the bucket samples in the previous range.
+#[derive(Debug)]
+pub struct DRSampleRanges {
+    bucket: UniformSampleRange,
+    node: UniformSampleRange,
+}
+
 impl Graph {
     // new returns a new graph instance from the given parameters.
     // The graph's edges are not generated yet, call fill_drg to compute the edges.
@@ -338,10 +354,14 @@ impl Graph {
     /// * `m`: Target base degree for each node *without* counting direct predecessor.
     /// * `rng`: RNG used *twice*, for bucket selection and posterior node selection
     ///           (within that bucket).
+    /// Returns:
+    /// * Sampled parent.
+    /// * Ranges used in the uniform sample to arrive to that parent (for testing
+    ///    purposes only, can be safely ignore elsewhere).
     // FIXME: Check the RNG type, previous implementation used `ChaChaRng`, not
     //  `ChaCha20Rng`. Even if there's no significant difference we need to unify
     //  them for cross-testing and comparison purposes.
-    fn sample_parent_node(node: usize, m: usize, rng: &mut ChaCha20Rng) -> usize {
+    fn sample_parent_node(node: usize, m: usize, rng: &mut ChaCha20Rng) -> (usize, DRSampleRanges) {
         // meta_idx represents a meta node in the meta graph
         // each node is represented m times, so we always take the
         // first node index to not fall on the same final index
@@ -353,6 +373,10 @@ impl Graph {
         let max_bucket = (meta_idx as f32).log2().ceil() as usize;
         // choose bucket index {1 ... ceil(log2(idx))}
         let i: usize = rng.gen_range(1, max_bucket + 1);
+        let bucket_range = UniformSampleRange {
+            low: 1,
+            high: max_bucket + 1,
+        };
         // choose parent in range [min(2, 2^(i-1)), max(meta,2^i)[
 
         // min to avoid choosing a node which is higher than
@@ -362,11 +386,21 @@ impl Graph {
         let min = std::cmp::max(2, max >> 1);
         assert!(max <= meta_idx);
         let meta_parent = meta_idx - rng.gen_range(min, max + 1);
+        let node_range = UniformSampleRange {
+            low: min,
+            high: max + 1,
+        };
         let real_parent = meta_parent / m;
         assert!(meta_parent < meta_idx);
         assert!(real_parent < node);
 
-        real_parent
+        (
+            real_parent,
+            DRSampleRanges {
+                bucket: bucket_range,
+                node: node_range,
+            },
+        )
     }
 
     /// Connect to `k` closest neighbors (see `KConnector`).
