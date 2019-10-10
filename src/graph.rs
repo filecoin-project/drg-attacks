@@ -81,10 +81,10 @@ pub enum DRGAlgo {
 }
 
 /// Range used for a uniform distribution sample in `Rng::gen_range`: `[low, high)`.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct UniformSampleRange {
-    low: usize,
-    high: usize,
+    pub low: usize,
+    pub high: usize,
 }
 
 /// Ranges used for random sample of a generated parent. The `bucket` range is
@@ -94,6 +94,22 @@ pub struct UniformSampleRange {
 pub struct DRSampleRanges {
     bucket: UniformSampleRange,
     node: UniformSampleRange,
+}
+
+/// Abstraction over `Rng::gen_range`, which is the only thing we use from
+/// that interface, in order to replace it with a fake RNG for testing purposes.
+/// (We explicitly avoid reusing the `gen_range` name just to avoid multiple
+/// candidates issues.)
+trait SampleRange {
+    fn sample_range(&mut self, range: &UniformSampleRange) -> usize;
+}
+impl<R> SampleRange for R
+where
+    R: Rng,
+{
+    fn sample_range(&mut self, range: &UniformSampleRange) -> usize {
+        self.gen_range(range.low, range.high)
+    }
 }
 
 impl Graph {
@@ -339,7 +355,7 @@ impl Graph {
 
                     // similar to bucket_sample but we select m parents instead
                     // of just one
-                    parents.extend((0..m).map(|_| Self::sample_parent_node(node, m, rng)));
+                    parents.extend((0..m).map(|_| Self::sample_parent_node(node, m, rng).0));
                 }
             }
             // filtering duplicate parents
@@ -361,7 +377,11 @@ impl Graph {
     // FIXME: Check the RNG type, previous implementation used `ChaChaRng`, not
     //  `ChaCha20Rng`. Even if there's no significant difference we need to unify
     //  them for cross-testing and comparison purposes.
-    fn sample_parent_node(node: usize, m: usize, rng: &mut ChaCha20Rng) -> (usize, DRSampleRanges) {
+    // FIXME: Revisit the name.
+    fn sample_parent_node<R>(node: usize, m: usize, rng: &mut R) -> (usize, DRSampleRanges)
+    where
+        R: SampleRange,
+    {
         // meta_idx represents a meta node in the meta graph
         // each node is represented m times, so we always take the
         // first node index to not fall on the same final index
@@ -372,11 +392,11 @@ impl Graph {
         // ceil instead of floor() + 1
         let max_bucket = (meta_idx as f32).log2().ceil() as usize;
         // choose bucket index {1 ... ceil(log2(idx))}
-        let i: usize = rng.gen_range(1, max_bucket + 1);
         let bucket_range = UniformSampleRange {
             low: 1,
             high: max_bucket + 1,
         };
+        let i: usize = rng.sample_range(&bucket_range);
         // choose parent in range [min(2, 2^(i-1)), max(meta,2^i)[
 
         // min to avoid choosing a node which is higher than
@@ -385,11 +405,11 @@ impl Graph {
         let max = std::cmp::min(meta_idx, 1 << i);
         let min = std::cmp::max(2, max >> 1);
         assert!(max <= meta_idx);
-        let meta_parent = meta_idx - rng.gen_range(min, max + 1);
         let node_range = UniformSampleRange {
             low: min,
             high: max + 1,
         };
+        let meta_parent = meta_idx - rng.sample_range(&node_range);
         let real_parent = meta_parent / m;
         assert!(meta_parent < meta_idx);
         assert!(real_parent < node);
@@ -836,5 +856,48 @@ pub mod tests {
             parents: parents,
             children: vec![],
         }
+    }
+
+    /// Fake RNG used only to generate values for `gen_range` taken from
+    /// an internal pre-populated vector.
+    // FIXME: There's probably a cleaner way without the references and lifetimes.
+    struct FakeRNG<'a> {
+        iter: &'a mut dyn Iterator<Item = &'a usize>,
+    }
+    impl SampleRange for FakeRNG<'_> {
+        fn sample_range(&mut self, range: &UniformSampleRange) -> usize {
+            let value = *self.iter.next().expect("run out of numbers");
+            let sample = (value % (range.high - range.low)) + range.low;
+            assert!(sample >= range.low);
+            assert!(sample < range.high);
+            sample
+        }
+    }
+
+    // Test the ranges over which BucketSample samples the bucket
+    // and the node.
+    // FIXME: The current numbers were just added after the fact to
+    //  match the observed output. We should reason to check if they
+    //  are correct and what should be expected in general.
+    #[test]
+    fn drsample_distributions_ranges() {
+        let v = vec![1, 2, 3, 4, 5, 6];
+        let i = v.iter();
+        let mut rng = FakeRNG {
+            iter: &mut i.cycle(),
+        };
+
+        let node = 10;
+        let m = 5;
+
+        let (_, ranges) = Graph::sample_parent_node(node, m, &mut rng);
+        assert_eq!(ranges.bucket, UniformSampleRange { low: 1, high: 7 });
+        assert_eq!(ranges.node, UniformSampleRange { low: 2, high: 5 });
+
+        let (_, ranges) = Graph::sample_parent_node(node, m, &mut rng);
+        assert_eq!(ranges.node, UniformSampleRange { low: 8, high: 17 });
+
+        let (_, ranges) = Graph::sample_parent_node(node, m, &mut rng);
+        assert_eq!(ranges.node, UniformSampleRange { low: 25, high: 51 });
     }
 }
