@@ -324,29 +324,7 @@ impl Graph {
                     // similar to bucket_sample but we select m parents instead
                     // of just one
                     for k in 0..m {
-                        // meta_idx represents a meta node in the meta graph
-                        // each node is represented m times, so we always take the
-                        // first node index to not fall on the same final index
-                        // graphically, it looks like
-                        // [ [node 0, ..., node 0, node 1 ... node 1, etc]
-                        // with each "bucket" of node having length
-                        let meta_idx = node * m;
-                        // ceil instead of floor() + 1
-                        let max_bucket = (meta_idx as f32).log2().ceil() as usize;
-                        // choose bucket index {1 ... ceil(log2(idx))}
-                        let i: usize = rng.gen_range(1, max_bucket + 1);
-                        // choose parent in range [min(2, 2^(i-1)), max(meta,2^i)[
-
-                        // min to avoid choosing a node which is higher than
-                        // the meta_idx - can happen since we can choose one
-                        // in the same bucket!
-                        let max = std::cmp::min(meta_idx, 1 << i);
-                        let min = std::cmp::max(2, max >> 1);
-                        assert!(max <= meta_idx);
-                        let meta_parent = meta_idx - rng.gen_range(min, max + 1);
-                        let real_parent = meta_parent / m;
-                        assert!(meta_parent < meta_idx);
-                        assert!(real_parent < node);
+                        let real_parent = sample_parent_node(node, m, k, rng);
                         parents.push(real_parent);
                     }
                 }
@@ -355,6 +333,45 @@ impl Graph {
             remove_duplicate(&mut parents);
             self.parents.push(parents);
         }
+    }
+
+    /// Core of the meta-graph construction (`meta_bucket`) isolated for audit and
+    /// test purposes: samples *one* parent of a node. Parameters:
+    /// * `node`: Index of the original node we're assigning a parent to.
+    /// * `m`: Target base degree for each node *without* counting direct predecessor.
+    /// * `k`: Transitory index (in the `[0,m]` range) of the current parent being
+    ///         generated for this `node`.
+    /// * `rng`: RNG used *twice*, for bucket selection and posterior node selection
+    ///           (within that bucket).
+    // FIXME: Check the RNG type, previous implementation used `ChaChaRng`, not
+    //  `ChaCha20Rng`. Even if there's no significant difference we need to unify
+    //  them for cross-testing and comparison purposes.
+    fn sample_parent_node(node: usize, m: usize, k: usize, rng: &mut ChaCha20Rng) -> usize {
+        // meta_idx represents a meta node in the meta graph
+        // each node is represented m times, so we always take the
+        // first node index to not fall on the same final index
+        // graphically, it looks like
+        // [ [node 0, ..., node 0, node 1 ... node 1, etc]
+        // with each "bucket" of node having length
+        let meta_idx = node * m;
+        // ceil instead of floor() + 1
+        let max_bucket = (meta_idx as f32).log2().ceil() as usize;
+        // choose bucket index {1 ... ceil(log2(idx))}
+        let i: usize = rng.gen_range(1, max_bucket + 1);
+        // choose parent in range [min(2, 2^(i-1)), max(meta,2^i)[
+
+        // min to avoid choosing a node which is higher than
+        // the meta_idx - can happen since we can choose one
+        // in the same bucket!
+        let max = std::cmp::min(meta_idx, 1 << i);
+        let min = std::cmp::max(2, max >> 1);
+        assert!(max <= meta_idx);
+        let meta_parent = meta_idx - rng.gen_range(min, max + 1);
+        let real_parent = meta_parent / m;
+        assert!(meta_parent < meta_idx);
+        assert!(real_parent < node);
+
+        real_parent
     }
 
     /// Connect to `k` closest neighbors (see `KConnector`).
