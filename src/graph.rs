@@ -323,10 +323,7 @@ impl Graph {
 
                     // similar to bucket_sample but we select m parents instead
                     // of just one
-                    for k in 0..m {
-                        let real_parent = sample_parent_node(node, m, k, rng);
-                        parents.push(real_parent);
-                    }
+                    parents.extend((0..m).map(|_| Self::sample_parent_node(node, m, rng)));
                 }
             }
             // filtering duplicate parents
@@ -339,14 +336,12 @@ impl Graph {
     /// test purposes: samples *one* parent of a node. Parameters:
     /// * `node`: Index of the original node we're assigning a parent to.
     /// * `m`: Target base degree for each node *without* counting direct predecessor.
-    /// * `k`: Transitory index (in the `[0,m]` range) of the current parent being
-    ///         generated for this `node`.
     /// * `rng`: RNG used *twice*, for bucket selection and posterior node selection
     ///           (within that bucket).
     // FIXME: Check the RNG type, previous implementation used `ChaChaRng`, not
     //  `ChaCha20Rng`. Even if there's no significant difference we need to unify
     //  them for cross-testing and comparison purposes.
-    fn sample_parent_node(node: usize, m: usize, k: usize, rng: &mut ChaCha20Rng) -> usize {
+    fn sample_parent_node(node: usize, m: usize, rng: &mut ChaCha20Rng) -> usize {
         // meta_idx represents a meta node in the meta graph
         // each node is represented m times, so we always take the
         // first node index to not fall on the same final index
