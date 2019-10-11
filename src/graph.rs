@@ -1,5 +1,5 @@
 use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha20Rng;
+use rand_chacha::ChaChaRng;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -119,13 +119,13 @@ impl Graph {
         // FIXME: To avoid changing too much code at the moment the `GraphSpec`
         //  is built here, but ideally the consumer should already provide it.
         let spec = GraphSpec { seed, size, algo };
-        let mut rng = ChaCha20Rng::from_seed(spec.seed);
+        let mut rng = ChaChaRng::from_seed(spec.seed);
 
         Self::new_from_rng(spec, &mut rng)
     }
 
     // FIXME: The RNG is not always necessary so this function is misleading.
-    pub fn new_from_rng(spec: GraphSpec, rng: &mut ChaCha20Rng) -> Graph {
+    pub fn new_from_rng(spec: GraphSpec, rng: &mut ChaChaRng) -> Graph {
         let mut g = Graph {
             spec,
             parents: Vec::with_capacity(spec.size),
@@ -302,7 +302,7 @@ impl Graph {
     // Implementation of the first algorithm BucketSample on page 22 of the
     // porep paper : https://web.stanford.edu/~bfisch/porep_short.pdf
     // It produces a degree-2 graph which is asymptotically depth-robust.
-    fn bucket_sample(&mut self, rng: &mut ChaCha20Rng) {
+    fn bucket_sample(&mut self, rng: &mut ChaChaRng) {
         for node in 0..self.parents.capacity() {
             let mut parents = Vec::new();
             match node {
@@ -338,7 +338,7 @@ impl Graph {
     // Implementation of the meta-graph construction algorithm described in page 22
     // of the porep paper https://web.stanford.edu/~bfisch/porep_short.pdf
     // It produces a degree-d graph on average.
-    fn meta_bucket(&mut self, degree: usize, rng: &mut ChaCha20Rng) {
+    fn meta_bucket(&mut self, degree: usize, rng: &mut ChaChaRng) {
         let m = degree - 1;
         for node in 0..self.parents.capacity() {
             let mut parents = Vec::with_capacity(degree);
@@ -374,9 +374,6 @@ impl Graph {
     /// * Sampled parent.
     /// * Ranges used in the uniform sample to arrive to that parent (for testing
     ///    purposes only, can be safely ignore elsewhere).
-    // FIXME: Check the RNG type, previous implementation used `ChaChaRng`, not
-    //  `ChaCha20Rng`. Even if there's no significant difference we need to unify
-    //  them for cross-testing and comparison purposes.
     // FIXME: Revisit the name.
     fn sample_parent_node<R>(node: usize, m: usize, rng: &mut R) -> (usize, DRSampleRanges)
     where
@@ -742,7 +739,7 @@ pub mod tests {
         let g3 = Graph::new(size, TEST_SEED, DRGAlgo::MetaBucket(3));
         assert!(g3.depth() < size);
         let ssize = (2 ^ 6);
-        let mut rng = ChaCha20Rng::from_seed(TEST_SEED);
+        let mut rng = ChaChaRng::from_seed(TEST_SEED);
         let sv = (0..ssize)
             .map(|_| rng.gen_range(0, size))
             .collect::<HashSet<usize>>();
