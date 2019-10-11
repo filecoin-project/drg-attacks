@@ -100,10 +100,10 @@ pub struct DRSampleRanges {
 /// that interface, in order to replace it with a fake RNG for testing purposes.
 /// (We explicitly avoid reusing the `gen_range` name just to avoid multiple
 /// candidates issues.)
-trait SampleRange {
+trait UniformSampling {
     fn sample_range(&mut self, range: &UniformSampleRange) -> usize;
 }
-impl<R> SampleRange for R
+impl<R> UniformSampling for R
 where
     R: Rng,
 {
@@ -377,7 +377,7 @@ impl Graph {
     // FIXME: Revisit the name.
     fn sample_parent_node<R>(node: usize, m: usize, rng: &mut R) -> (usize, DRSampleRanges)
     where
-        R: SampleRange,
+        R: UniformSampling,
     {
         // meta_idx represents a meta node in the meta graph
         // each node is represented m times, so we always take the
@@ -861,7 +861,7 @@ pub mod tests {
     struct FakeRNG<'a> {
         iter: &'a mut dyn Iterator<Item = &'a usize>,
     }
-    impl SampleRange for FakeRNG<'_> {
+    impl UniformSampling for FakeRNG<'_> {
         fn sample_range(&mut self, range: &UniformSampleRange) -> usize {
             let value = *self.iter.next().expect("run out of numbers");
             let sample = (value % (range.high - range.low)) + range.low;
