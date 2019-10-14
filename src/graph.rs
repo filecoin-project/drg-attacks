@@ -1,3 +1,4 @@
+use fnv::FnvHasher;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
 use serde::{Deserialize, Serialize};
@@ -6,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::error;
 use std::fmt;
 use std::fs::File;
-use std::hash::Hash;
+use std::hash::{BuildHasherDefault, Hash};
 use std::io::BufReader;
 
 /// Data that completely specifies the `Graph` to be created. Many runs
@@ -63,6 +64,14 @@ impl Edge {
         Edge { parent, child }
     }
 }
+
+/// Faster hasher than the default implementation to speed up hash set use
+/// according to:
+/// * https://blog.rust-lang.org/2016/03/02/Rust-1.7.html#library-stabilizations
+// FIXME: Research more up-to-date solutions (or drop the `HashSet` entirely).
+pub type FastHashSet<T> = HashSet<T, BuildHasherDefault<FnvHasher>>;
+pub type NodeSet = FastHashSet<Node>;
+pub type EdgeSet = FastHashSet<Edge>;
 
 // DRGAlgo represents which algorithm can be used to create the edges so a Graph is
 // a Depth Robust Graph
@@ -181,7 +190,7 @@ impl Graph {
 
     // depth_exclude returns the depth of the graph when excluding the given
     // set of nodes
-    pub fn depth_exclude(&self, set: &HashSet<usize>) -> usize {
+    pub fn depth_exclude(&self, set: &NodeSet) -> usize {
         self.parents
             .iter()
             .enumerate()
@@ -230,7 +239,7 @@ impl Graph {
     // TODO: Is it possible to use traits to implement the equivalent of
     // function overloading as to get only one "depth_exclude" that works
     // for both types ?
-    pub fn depth_exclude_edges(&self, edges: &HashSet<Edge>) -> usize {
+    pub fn depth_exclude_edges(&self, edges: &EdgeSet) -> usize {
         // transform set of edges into list of parent relationship
         let edges_map = edges.iter().fold(HashMap::new(), |mut acc, edge| {
             (*acc.entry(edge.child).or_insert(Vec::new())).push(edge.parent);
@@ -263,7 +272,7 @@ impl Graph {
 
     // remove returns a new graph with the specified nodes removed
     // TODO slow path checking in O(n) - consider using bitset for nodes
-    pub fn remove(&self, nodes: &HashSet<usize>) -> Graph {
+    pub fn remove(&self, nodes: &NodeSet) -> Graph {
         let mut out = Vec::with_capacity(self.parents.len());
         for i in 0..self.parents.len() {
             let parents = self.parents.get(i).unwrap();
@@ -742,7 +751,7 @@ pub mod tests {
         let mut rng = ChaChaRng::from_seed(TEST_SEED);
         let sv = (0..ssize)
             .map(|_| rng.gen_range(0, size))
-            .collect::<HashSet<usize>>();
+            .collect::<NodeSet>();
         assert!(g3.depth_exclude(&sv) < size);
     }
 
