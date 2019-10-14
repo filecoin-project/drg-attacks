@@ -10,6 +10,37 @@ use std::env;
 #[macro_use]
 extern crate lazy_static;
 
+#[cfg(feature = "cpu-profile")]
+use gperftools::profiler::PROFILER;
+
+/// Start profile (currently use for the Greedy attack) and dump the file in
+/// the current directory. It can later be analyzed with `pprof`, e.g.,
+/// ```text
+/// cargo run --release --features cpu-profile  -- greedy
+/// pprof --lines --dot target/release/drg-attacks greedy.profile > profile.dot
+/// xdot profile.dot
+/// ```
+#[cfg(feature = "cpu-profile")]
+#[inline(always)]
+fn start_profile(stage: &str) {
+    PROFILER
+        .lock()
+        .unwrap()
+        .start(format!("./{}.profile", stage))
+        .unwrap();
+}
+#[cfg(feature = "cpu-profile")]
+#[inline(always)]
+fn stop_profile() {
+    PROFILER.lock().unwrap().stop().unwrap();
+}
+#[cfg(not(feature = "cpu-profile"))]
+#[inline(always)]
+fn start_profile(_stage: &str) {}
+#[cfg(not(feature = "cpu-profile"))]
+#[inline(always)]
+fn stop_profile() {}
+
 fn porep_comparison() {
     let random_bytes = rand::thread_rng().gen::<[u8; 32]>();
     let n = 20;
@@ -113,10 +144,12 @@ fn greedy_attacks() {
     profile.range.end = 0.5;
     profile.range.interval = 0.1;
 
+    start_profile("greedy");
     let res = attack_with_profile(spec, &profile);
     // FIXME: Turn this into a JSON output.
     println!("\n\n------------------");
     println!("Attack finished: {:?}", profile);
+    stop_profile();
     let json = serde_json::to_string_pretty(&res).expect("can't serialize to json");
     println!("{}", json);
 }

@@ -12,3 +12,15 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
 pretty_env_logger = "0.3.1"
+gperftools = "0.2"
+
+[features]
+default = []
+cpu-profile = []
+
+[profile.release]
+# debug = true
+# Include debug symbols for the `--lines` option in `pprof` to
+# take effect.
+# FIXME: We want debug symbols in release mode only when profiling,
+#  this option should be controlled by the `cpu-profile` feature.
