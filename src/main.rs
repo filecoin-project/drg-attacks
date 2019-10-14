@@ -10,13 +10,14 @@ use std::env;
 #[macro_use]
 extern crate lazy_static;
 
+use clap::{value_t, App, Arg, SubCommand};
 #[cfg(feature = "cpu-profile")]
 use gperftools::profiler::PROFILER;
 
 /// Start profile (currently use for the Greedy attack) and dump the file in
 /// the current directory. It can later be analyzed with `pprof`, e.g.,
 /// ```text
-/// cargo run --release --features cpu-profile  -- greedy
+/// cargo run --release --features cpu-profile  -- -n 12 greedy
 /// pprof --lines --dot target/release/drg-attacks greedy.profile > profile.dot
 /// xdot profile.dot
 /// ```
@@ -107,11 +108,10 @@ fn porep_comparison() {
     // NOTE: AB16 seems slower and less performant than the ValiantDepth
 }
 
-fn greedy_attacks() {
+fn greedy_attacks(n: usize) {
     println!("Greedy Attacks parameters");
     let random_bytes = rand::thread_rng().gen::<[u8; 32]>();
-    let n = 10;
-    let size = (2 as usize).pow(n);
+    let size = (2 as usize).pow(n as u32);
     let deg = 6;
     let target_size = (0.30 * size as f64) as usize;
     let spec = GraphSpec {
@@ -194,15 +194,36 @@ fn baseline() {
 
 fn main() {
     pretty_env_logger::init_timed();
-    let args: Vec<String> = env::args().collect();
-    if args.len() > 1 {
-        match args[1].to_lowercase().trim() {
-            "greedy" => greedy_attacks(),
-            "porep" => porep_comparison(),
-            "baseline" => baseline(),
-            _ => panic!("command not understood: choose greedy or porep"),
-        }
+
+    let matches = App::new("DRG Attacks")
+        .version("1.0")
+        .arg(
+            Arg::with_name("size")
+                .short("n")
+                .long("size-n")
+                .help("Size of graph expressed as a power of 2")
+                .default_value("10")
+                .takes_value(true),
+        )
+        .subcommand(SubCommand::with_name("greedy").about("Greedy attack"))
+        .subcommand(SubCommand::with_name("porep"))
+        .subcommand(SubCommand::with_name("baseline"))
+        .get_matches();
+
+    let n = value_t!(matches, "size", usize).unwrap();
+    assert!(n < 50, "graph size is too big (2^{})", n);
+    // FIXME: Use this argument for all attacks, not just Greedy (different
+    // attacks may use different default values).
+
+    if let Some(_) = matches.subcommand_matches("greedy") {
+        greedy_attacks(n);
+    } else if let Some(_) = matches.subcommand_matches("porep") {
+        porep_comparison();
+    } else if let Some(_) = matches.subcommand_matches("baseline") {
+        porep_comparison();
     } else {
+        eprintln!("No subcommand entered, running `porep_comparison`");
         porep_comparison();
     }
+    // FIXME: Can this be structured with a `match`?
 }
