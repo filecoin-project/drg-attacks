@@ -563,7 +563,24 @@ impl Graph {
             }
         }
     }
-    // FIXME: Add an internal parent/edge iterator.
+
+    pub fn for_each_edge_filtered<F>(&self, s: &ExclusionSet, mut func: F)
+    where
+        F: FnMut(&Edge) -> (),
+    {
+        if self.children().len() == 0 {
+            panic!("Tried to use self.children() before projecting");
+        }
+
+        for (parent, all_children) in self.children().iter().enumerate() {
+            if !s.contains(parent) {
+                for &child in all_children.iter() {
+                    func(&Edge::new(parent, child));
+                    // FIXME: PERF: Maybe don't construct a new edge in every call.
+                }
+            }
+        }
+    }
 
     // FIXME: Extend `F` definition to be able to return information (useful
     // to form new vectors from the original set of nodes).

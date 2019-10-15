@@ -516,17 +516,15 @@ fn count_paths(g: &Graph, s: &ExclusionSet, p: &GreedyParams) -> Vec<Pair> {
     }
 
     for d in 1..=length {
-        g.for_each_edge(|e| {
-            // checking each parents (vs only checking direct + 1parent in C#)
-            // no ending path for node i if the parent is contained in S
-            // since G - S doesn't have this parent
-            if !s.contains(e.parent) {
-                ending_paths[e.child][d] += ending_paths[e.parent][d - 1];
+        // checking each parents (vs only checking direct + 1parent in C#)
+        // no ending path for node i if the parent is contained in S
+        // since G - S doesn't have this parent
+        g.for_each_edge_filtered(s, |e| {
+            ending_paths[e.child][d] += ending_paths[e.parent][d - 1];
 
-                // difference vs the pseudo code: like in C#, increase parent count
-                // instead of iterating over children of node i
-                starting_paths[e.parent][d] += starting_paths[e.child][d - 1];
-            }
+            // difference vs the pseudo code: like in C#, increase parent count
+            // instead of iterating over children of node i
+            starting_paths[e.parent][d] += starting_paths[e.child][d - 1];
         });
     }
 
@@ -853,7 +851,8 @@ mod test {
 
     #[test]
     fn test_count_paths() {
-        let graph = graph::tests::graph_from(GREEDY_PARENTS.to_vec());
+        let mut graph = graph::tests::graph_from(GREEDY_PARENTS.to_vec());
+        graph.children_project();
         let target_length = 2;
         // test with empty set to remove
         let mut s = ExclusionSet::new(&graph);
@@ -898,7 +897,8 @@ mod test {
                 break;
             }
 
-            let g = Graph::new(TEST_SIZE, seed, DRGAlgo::KConnector(k));
+            let mut g = Graph::new(TEST_SIZE, seed, DRGAlgo::KConnector(k));
+            g.children_project();
 
             for length in 1..TEST_MAX_PATH_LENGTH {
                 // The number of incident paths for the center node should be:
