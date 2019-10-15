@@ -121,6 +121,65 @@ where
     }
 }
 
+/// Exclusion set `S` of nodes that are removed from `G`. Encapsulated in this
+/// interface to evaluate optimizations to its implementation (e.g., set vs vec).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExclusionSet {
+    v: Vec<bool>,
+    size: usize,
+}
+
+impl ExclusionSet {
+    /// Create new set `S` for a specified `size`.
+    pub fn new_with_size(size: usize) -> Self {
+        ExclusionSet {
+            v: vec![false; size],
+            size: 0,
+        }
+    }
+
+    /// Create new set `S` for a specified `G`.
+    pub fn new(graph: &Graph) -> Self {
+        Self::new_with_size(graph.size())
+    }
+
+    pub fn from_nodes(graph: &Graph, nodes: Vec<Node>) -> Self {
+        let mut es = Self::new(graph);
+        for node in nodes {
+            es.insert(node);
+        }
+        es
+    }
+
+    pub fn contains(&self, node: Node) -> bool {
+        self.v[node]
+    }
+
+    pub fn insert(&mut self, node: Node) {
+        if !self.contains(node) {
+            self.v[node] = true;
+            self.size += 1;
+        }
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn extend(&mut self, es: &ExclusionSet) {
+        assert!(
+            self.v.len() == es.v.len(),
+            "exclusion set len mismatch when extending"
+        );
+        for node in 0..self.v.len() {
+            if !self.contains(node) && es.contains(node) {
+                self.v[node] = true;
+                self.size += 1;
+            }
+        }
+    }
+}
+
 impl Graph {
     // new returns a new graph instance from the given parameters.
     // The graph's edges are not generated yet, call fill_drg to compute the edges.
@@ -190,12 +249,12 @@ impl Graph {
 
     // depth_exclude returns the depth of the graph when excluding the given
     // set of nodes
-    pub fn depth_exclude(&self, set: &NodeSet) -> usize {
+    pub fn depth_exclude(&self, set: &ExclusionSet) -> usize {
         self.parents
             .iter()
             .enumerate()
             .fold(Vec::new(), |mut acc, (i, parents)| {
-                if set.contains(&i) {
+                if set.contains(i) {
                     // an excluded node has length 0
                     acc.push(0);
                     return acc;
@@ -203,7 +262,7 @@ impl Graph {
                 match parents
                     .iter()
                     // dont take parent's length if contained in set
-                    .filter(|&p| !set.contains(p))
+                    .filter(|&p| !set.contains(*p))
                     .map(|&p| acc[p] + 1)
                     .max()
                 {
@@ -272,18 +331,18 @@ impl Graph {
 
     // remove returns a new graph with the specified nodes removed
     // TODO slow path checking in O(n) - consider using bitset for nodes
-    pub fn remove(&self, nodes: &NodeSet) -> Graph {
+    pub fn remove(&self, nodes: &ExclusionSet) -> Graph {
         let mut out = Vec::with_capacity(self.parents.len());
         for i in 0..self.parents.len() {
             let parents = self.parents.get(i).unwrap();
-            let new_parents = if nodes.contains(&i) {
+            let new_parents = if nodes.contains(i) {
                 // no parent for a deleted node
                 Vec::new()
             } else {
                 // only take parents which are not in the list of nodes
                 parents
                     .into_iter()
-                    .filter(|&parent| !nodes.contains(parent))
+                    .filter(|&parent| !nodes.contains(*parent))
                     .map(|&p| p)
                     .collect::<Vec<usize>>()
             };
@@ -702,7 +761,7 @@ pub mod tests {
         let p1 = vec![vec![], vec![0], vec![0, 1], vec![2], vec![2, 3]];
         let g1 = graph_from(p1);
 
-        let nodes = HashSet::from_iter(vec![1, 3].iter().cloned());
+        let nodes = ExclusionSet::from_nodes(&g1, vec![1, 3]);
         let g3 = g1.remove(&nodes);
         let expected = vec![vec![], vec![], vec![0], vec![], vec![2]];
         assert_eq!(g3.parents.len(), 5);
@@ -734,13 +793,13 @@ pub mod tests {
     fn graph_depth_exclude() {
         let p1 = vec![vec![], vec![0], vec![1], vec![2], vec![3]];
         let g1 = graph_from(p1);
-        let s = HashSet::from_iter(vec![2]);
+        let s = ExclusionSet::from_nodes(&g1, vec![2]);
         assert_eq!(g1.depth_exclude(&s), 1);
 
         let g2 = Graph::new(17, TEST_SEED, DRGAlgo::MetaBucket(3));
-        let s = HashSet::from_iter(vec![2, 8, 15, 5, 10]);
+        let s = ExclusionSet::from_nodes(&g2, vec![2, 8, 15, 5, 10]);
         let depthex = g2.depth_exclude(&s);
-        assert!(depthex < (g2.cap() - s.len()));
+        assert!(depthex < (g2.cap() - s.size()));
         let g3 = g2.remove(&s);
         assert_eq!(g3.depth(), depthex);
 
@@ -749,9 +808,10 @@ pub mod tests {
         assert!(g3.depth() < size);
         let ssize = (2 ^ 6);
         let mut rng = ChaChaRng::from_seed(TEST_SEED);
-        let sv = (0..ssize)
-            .map(|_| rng.gen_range(0, size))
-            .collect::<NodeSet>();
+        let mut sv = ExclusionSet::new(&g3);
+        for _ in (0..ssize) {
+            sv.insert(rng.gen_range(0, size));
+        }
         assert!(g3.depth_exclude(&sv) < size);
     }
 
