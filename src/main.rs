@@ -17,9 +17,9 @@ use gperftools::profiler::PROFILER;
 /// Start profile (currently use for the Greedy attack) and dump the file in
 /// the current directory. It can later be analyzed with `pprof`, e.g.,
 /// ```text
-/// cargo run --release --features cpu-profile  -- -n 12 greedy
-/// pprof --lines --dot target/release/drg-attacks greedy.profile > profile.dot
-/// xdot profile.dot
+/// cargo run --release --features cpu-profile  -- -n 14 greedy
+/// REV=$(git rev-parse --short HEAD)
+/// pprof --lines --dot target/release/drg-attacks greedy.profile > profile-$REV.dot && xdot profile-$REV.dot &
 /// ```
 #[cfg(feature = "cpu-profile")]
 #[inline(always)]
