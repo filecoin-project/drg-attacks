@@ -8,7 +8,7 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::Result;
 
-use crate::graph::{DRGAlgo, Edge, EdgeSet, ExclusionSet, Graph, GraphSpec, NodeSet};
+use crate::graph::{DRGAlgo, Edge, EdgeSet, ExclusionSet, Graph, GraphSpec, Node, NodeSet};
 use crate::utils;
 
 // FIXME: This name is no longer representative, we no longer attack using
@@ -407,8 +407,18 @@ fn append_removal(
 // of the given node. Size of the radius is given radius. It corresponds to the
 // under-specified function "UpdateNodesInRadius" in algo. 6 of
 // https://eprint.iacr.org/2018/944.pdf
+// NOTE: The `radius` shouldn't change across calls for the same `inradius` set,
+// that is, if we already have a node in `inradius` then we won't look for it
+// again because we assume we already found all its closest nodes within a
+// specified `radius` (if the `radius` increased across calls we would be missing
+// nodes that were farther away in comparison to earlier calls).
 fn update_radius_set(g: &Graph, node: usize, inradius: &mut NodeSet, radius: usize) {
-    let add_direct_nodes = |v: usize, closests: &mut NodeSet, _: &NodeSet| {
+    let mut closests: Vec<Node> = Vec::with_capacity(radius * 10);
+    // FIXME: We should be able to better estimate the size of this scratch
+    //  vector based on the `radius` and the average degree of the nodes.
+    let mut tosearch: Vec<Node> = Vec::with_capacity(closests.capacity());
+
+    let add_direct_nodes = |v: usize, closests: &mut Vec<Node>, _: &NodeSet| {
         // add all direct parent
         g.parents()[v]
             .iter()
@@ -417,7 +427,7 @@ fn update_radius_set(g: &Graph, node: usize, inradius: &mut NodeSet, radius: usi
             // FIXME see if it works and resolves any potential loops
             //.filter(|&parent| !rad.contains(parent))
             .for_each(|&parent| {
-                closests.insert(parent);
+                closests.push(parent);
             });
 
         // add all direct children
@@ -427,7 +437,7 @@ fn update_radius_set(g: &Graph, node: usize, inradius: &mut NodeSet, radius: usi
             // already in the radius, i.e. it already has been searched
             //.filter(|&child| !rad.contains(child))
             .for_each(|&child| {
-                closests.insert(child);
+                closests.push(child);
             });
         trace!(
             "\t add_direct node {}: at most {} parents and {} children",
@@ -438,17 +448,20 @@ fn update_radius_set(g: &Graph, node: usize, inradius: &mut NodeSet, radius: usi
     };
     // insert first the given node and then add the close nodes
     inradius.insert(node);
-    let mut tosearch = NodeSet::default();
-    tosearch.insert(node);
+    tosearch.push(node);
     // do it recursively "radius" times
     for i in 0..radius {
-        let mut closests = NodeSet::default();
+        closests.clear();
         // grab all direct nodes of those already in radius "i"
         for &v in tosearch.iter() {
             add_direct_nodes(v, &mut closests, inradius);
         }
-        tosearch = closests.clone();
-        inradius.extend(closests);
+        tosearch.clear();
+        for &mut node in &mut closests {
+            if inradius.insert(node) {
+                tosearch.push(node);
+            }
+        }
         trace!(
             "update radius {}: {} new nodes, total {}",
             i,
@@ -830,6 +843,10 @@ mod test {
 
         update_radius_set(&graph, node, &mut inradius, 1);
         assert_eq!(inradius, HashSet::from_iter(vec![0, 1, 2, 3, 4]));
+
+        // Start another search with a bigger `radius`, clear previous
+        // `inradius` to look for the nodes all over again.
+        inradius.clear();
         update_radius_set(&graph, node, &mut inradius, 2);
         assert_eq!(inradius, HashSet::from_iter(vec![0, 1, 2, 3, 4, 5]));
     }
