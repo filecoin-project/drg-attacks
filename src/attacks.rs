@@ -6,7 +6,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::graph::{EdgeSet, ExclusionSet, Graph, GraphSpec, Node, NodeSet};
+use crate::graph::{Edge, EdgeSet, ExclusionSet, Graph, GraphSpec, Node, NodeSet};
 use crate::utils;
 
 // FIXME: This name is no longer representative, we no longer attack using
@@ -25,6 +25,10 @@ pub enum DepthReduceSet {
     GreedyDepth(usize, GreedyParams),
     /// Variation of Greedy attack that has as `target` the resulting size of set S.
     GreedySize(usize, GreedyParams),
+    /// PoC attack that removes nodes with increasing interval until finding a NER
+    /// above a predefined target DER. Based on intuitions developed in the documentation.
+    // FIXME: Does not enforce a max S size (`e`) at the moment.
+    ExchangeNodes(usize, f32),
 }
 
 pub fn depth_reduce(g: &mut Graph, drs: DepthReduceSet) -> ExclusionSet {
@@ -34,6 +38,7 @@ pub fn depth_reduce(g: &mut Graph, drs: DepthReduceSet) -> ExclusionSet {
         DepthReduceSet::ValiantAB16(_) => valiant_reduce(g, drs),
         DepthReduceSet::GreedyDepth(_, _) => greedy_reduce(g, drs),
         DepthReduceSet::GreedySize(_, _) => greedy_reduce(g, drs),
+        DepthReduceSet::ExchangeNodes(_, target_der) => exchange_nodes_attack(g, target_der),
     }
 }
 
@@ -87,6 +92,7 @@ impl AttackProfile {
             DepthReduceSet::ValiantAB16(size) => AttackTarget::Size(size as f64 / graph_size),
             DepthReduceSet::GreedyDepth(depth, _) => AttackTarget::Depth(depth as f64 / graph_size),
             DepthReduceSet::GreedySize(size, _) => AttackTarget::Size(size as f64 / graph_size),
+            DepthReduceSet::ExchangeNodes(size, _) => AttackTarget::Size(size as f64 / graph_size),
         };
         // FIXME: This code should absorb the `depth_reduce` and derived
         // functions logic. The target discrimination depth/size should
@@ -145,14 +151,18 @@ pub struct AveragedAttackResult {
     target: f64,
     mean_depth: f64,
     mean_size: f64,
+    mean_der: f64,
 }
 
 impl AveragedAttackResult {
     pub fn from_results(target: f64, results: &[SingleAttackResult]) -> Self {
         let aggregated: SingleAttackResult = results.iter().sum();
+        let mean_depth = aggregated.depth / results.len() as f64;
+        let mean_size = aggregated.exclusion_size / results.len() as f64;
         AveragedAttackResult {
-            mean_depth: aggregated.depth / results.len() as f64,
-            mean_size: aggregated.exclusion_size / results.len() as f64,
+            mean_depth,
+            mean_size,
+            mean_der: (1.0 - mean_depth) / mean_size,
             target: target,
         }
     }
@@ -223,6 +233,9 @@ pub fn attack_with_profile(spec: GraphSpec, profile: &AttackProfile) -> AttackRe
                     DepthReduceSet::GreedyDepth(absolute_target, p)
                 }
                 DepthReduceSet::GreedySize(_, p) => DepthReduceSet::GreedySize(absolute_target, p),
+                DepthReduceSet::ExchangeNodes(_, target_der) => {
+                    DepthReduceSet::ExchangeNodes(absolute_target, target_der)
+                }
             };
             // FIXME: Same as before, the target should be decoupled from the type of attack.
 
@@ -601,7 +614,9 @@ fn valiant_ab16(g: &Graph, target: usize) -> ExclusionSet {
         assert!(new_depth <= (di >> 1));
         // G_i+1 = G_i - S_i  where S_i is set of origin nodes in chosen partition
         let mut si = ExclusionSet::new(&g);
-        chosen.iter().for_each(|edge| si.insert(edge.parent));
+        chosen.iter().for_each(|edge| {
+            si.insert(edge.parent);
+        });
         trace!(
         "m/k = {}/{} = {}, chosen = {:?}, new_depth {}, curr.depth() {}, curr.dpeth_exclude {}, new edges {}, si {:?}",
         mi,
@@ -668,7 +683,9 @@ fn valiant_reduce_main(g: &Graph, f: &dyn Fn(&ExclusionSet) -> bool) -> Exclusio
     while f(&s) {
         let partition = find_next();
         // add the origin node for each edges in the chosen partition
-        partition.iter().for_each(|edge| s.insert(edge.parent));
+        partition.iter().for_each(|edge| {
+            s.insert(edge.parent);
+        });
     }
 
     return s;
@@ -692,6 +709,245 @@ fn valiant_partitions(g: &Graph) -> Vec<EdgeSet> {
     });
 
     eis
+}
+
+fn exchange_nodes_attack(graph: &mut Graph, target_der: f32) -> ExclusionSet {
+    let mut s = ExclusionSet::new(graph);
+
+    let mut exchanged: Vec<Edge> = Vec::new();
+    let mut left = 0;
+    while left < graph.size() {
+        trace!("Looking for a new edge starting at {}", left);
+        if let Some(switched_edge) = cut_covering(graph, &mut s, target_der, left, &mut exchanged) {
+            exchanged.push(switched_edge.clone());
+        }
+        left += 2;
+        // FIXME: How wide apart to avoid interactions between removals?
+        // FIXME: We may need to increment this with size or it will go too slow.
+    }
+
+    // match_edges(graph, &s, &exchanged);
+
+    s
+}
+
+fn cut_covering(
+    graph: &Graph,
+    s: &mut ExclusionSet,
+    target_der: f32,
+    left: Node,
+    exchanged: &mut Vec<Edge>,
+) -> Option<Edge> {
+    let mut span = target_der.ceil() as usize + 1;
+    // FIXME: The function is *VERY* sensitive to the initial span. The
+    // current value makes sense, it's the first range to take advantage
+    // of the very important single-node-removal case, but still.
+
+    // FIXME: (DER, Edge (new smallest), remove set S).
+    struct BestNER {
+        ner: f32,
+        switched_edge: Edge,
+        removed_nodes: ExclusionSet,
+        // FIXME: Change into a vector, use the set *only* during its generation.
+    };
+    let mut best: Option<BestNER> = None;
+
+    loop {
+        // span *= 2;
+        span = (span as f32 * 1.5).ceil() as usize;
+        let right = left + span;
+
+        if right >= graph.size() {
+            break;
+        }
+        // FIXME: Ideally I'd like a do-while here.
+
+        // Avoid spans that overlap with already exchanged edges, this
+        // greatly degrades performance.
+        if detect_overlap(left, span, exchanged) {
+            trace!("Skipping overlapping span {} - {}", left, right,);
+            break;
+        }
+
+        let (crossing, frontier) = crossing_edges(graph, left, span, s);
+
+        trace!("Scanning span right {} -> {}", frontier, right);
+        trace!("=============================");
+
+        if crossing.len() == 0 {
+            let ner = (span) as f32;
+            if ner > target_der {
+                trace!(
+                    "Found SIMPLE NER {:.2} by removing only frontier {}",
+                    ner,
+                    frontier
+                );
+                s.insert(frontier);
+            }
+            // FIXME: This shouldn't happen very often.
+        }
+
+        let mut removed_nodes = ExclusionSet::new(graph);
+        if !s.contains(frontier) {
+            removed_nodes.insert(frontier);
+        }
+
+        for edge in crossing.iter() {
+            if !(edge.active(s) && edge.active(&removed_nodes)) {
+                continue;
+                // This edge isn't active after the nodes we've removed.
+            }
+
+            // Remove the closest one. Removing only from the right
+            // (`edge.child`) simplified the model but lowered efficacy a bit.
+            let node_to_remove = edge.closest_to(frontier);
+            assert!(removed_nodes.insert(node_to_remove));
+
+            let ner = edge.interval() as f32 / removed_nodes.size() as f32;
+
+            trace!(
+                "Interval: {:02}, NER {:.2}, Nodes: {:.4}, Edge {}, removing {}",
+                edge.interval(),
+                ner,
+                removed_nodes.size(),
+                edge,
+                node_to_remove
+            );
+            // FIXME: Track highest removed node from the frontier, how much is
+            // that of the span, and how much gaps are there in the middle.
+
+            if ner >= target_der && (best.is_none() || ner > (&mut best).as_ref().unwrap().ner) {
+                // FIXME: There should be a cleaner way to access `best`.
+
+                best = Some(BestNER {
+                    ner,
+                    switched_edge: edge.clone(),
+                    removed_nodes: removed_nodes.clone(),
+                });
+
+                trace!("NEW BEST ^");
+            }
+        }
+    }
+
+    if let Some(best) = best {
+        let remove_set = best.removed_nodes;
+        for node in 0..graph.size() {
+            if remove_set.contains(node) {
+                // trace!("Removing node {} (edge {})", node_to_remove, edge);
+                s.insert(node);
+                // assert!(s.insert(node));
+                // FIXME: Find out why the assert is failing, probably some
+                //  assumption of NER is failing.
+            }
+        }
+
+        let edge = best.switched_edge;
+        let ner = edge.interval() as f32 / (remove_set.size()) as f32;
+        trace!(
+            "Final NER: {:.2}, removing {} nodes",
+            ner,
+            remove_set.size()
+        );
+
+        return Some(edge);
+    }
+
+    None
+}
+
+/// Set of edges that cross a the middle (`frontier`) of a `span` of nodes from a `start`:
+/// active edges (both parent and child not removed) with end-points inside of this span,
+/// so their `intervals` can be at most `span/2`, ordered by increasing interval.
+// FIXME: It's very straightforward to test this function, so do it.
+fn crossing_edges(graph: &Graph, left: Node, span: usize, s: &ExclusionSet) -> (Vec<Edge>, Node) {
+    let frontier = left + span / 2;
+    let right = left + span;
+
+    // We only analyze nodes on the right, children, we don't need to look from edges
+    // coming from the left because by definition of this function they will land on
+    // children within the `(frontier, right)` range.
+    let mut crossing: Vec<Edge> = Vec::with_capacity(span * graph.degree());
+    for child in frontier + 1..right {
+        if s.contains(child) {
+            continue;
+        }
+        for &parent in graph.parents()[child].iter() {
+            if s.contains(parent) {
+                continue;
+            }
+            if !(parent < frontier) {
+                continue;
+            }
+
+            // Only study edges within the range.
+            if parent < left {
+                continue;
+            }
+
+            crossing.push(Edge { parent, child });
+        }
+    }
+
+    // We sort it by their space, the smallest one is the current limit of the exchange
+    // and defines the NER for this block, if we remove it the next one will be and so on.
+    // This is actually an approximation, longer edges might be taken in fact, depending on
+    // the surrounding path, but this seems (in average) a safe assumption.
+    crossing.sort_by_key(|edge| edge.interval());
+    for edge in &crossing {
+        // trace!("Found edge of space {} ({}) (pivot {})", edge.interval(), edge, pivot);
+        assert!(edge.interval() <= span);
+    }
+
+    (crossing, frontier)
+}
+
+fn detect_overlap(left: usize, span: usize, exchanged: &Vec<Edge>) -> bool {
+    let span_edge = Edge {
+        parent: left,
+        child: left + span,
+    };
+    // FIXME: Ugly, overloading the meaning of edge.
+
+    let mut overlap = false;
+    for edge in exchanged.iter() {
+        // FIXME: Sort and improve efficiency.
+        if edge.overlaps(&span_edge) {
+            overlap = true;
+            break;
+        }
+    }
+    overlap
+}
+
+// FIXME: Why can't we predict even a single edge?
+#[allow(dead_code)]
+fn match_edges(graph: &Graph, s: &ExclusionSet, exchanged: &Vec<Edge>) {
+    let depth_edges = graph.depth_exclude_with_edges(&s);
+    let mut edges_found = 0;
+    let mut average_interval = 0;
+    for e in exchanged.iter() {
+        if depth_edges.contains(e) {
+            edges_found += 1;
+            average_interval += e.interval();
+        }
+        trace!(
+            "Edge {} was{} in the depth edges",
+            e,
+            if depth_edges.contains(e) { "" } else { " NOT" }
+        );
+    }
+    let average_interval = average_interval as f32 / exchanged.len() as f32;
+    debug!(
+        "Found {}/{} ({:.2}%) of replaced edges in the final depth",
+        edges_found,
+        exchanged.len(),
+        edges_found as f32 / exchanged.len() as f32 * 100.0
+    );
+    debug!(
+        "Average interval of replaced edges: {:.0}",
+        average_interval
+    );
 }
 
 #[cfg(test)]

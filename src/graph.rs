@@ -62,6 +62,38 @@ impl Edge {
         );
         Edge { parent, child }
     }
+
+    pub fn interval(&self) -> usize {
+        self.child - self.parent - 1
+    }
+
+    pub fn active(&self, s: &ExclusionSet) -> bool {
+        !s.contains(self.parent) && !s.contains(self.child)
+    }
+
+    pub fn inside_interval(&self, node: Node) -> bool {
+        node > self.parent && node < self.child
+    }
+
+    pub fn closest_to(&self, node: Node) -> Node {
+        assert!(self.inside_interval(node));
+        if node - self.parent > self.child - node {
+            self.child
+        } else {
+            self.parent
+        }
+    }
+
+    pub fn overlaps(&self, other: &Edge) -> bool {
+        // Easier to think of non-overlapping cases:
+        !(self.child < other.parent || self.parent > other.child)
+    }
+}
+
+impl fmt::Display for Edge {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}-{}", self.parent, self.child)
+    }
 }
 
 /// Faster hasher than the default implementation to speed up hash set use
@@ -86,6 +118,12 @@ pub enum DRGAlgo {
     /// the *closest* ones is just to guarantee that with a regular topology. This
     /// algorithm is mostly for testing purposes.
     KConnector(usize),
+    /// Uniform graph with all nodes with the same `m` edges, each with an interval
+    /// `ner` times bigger than the last.
+    UniformGraph {
+        m: usize,
+        ner: usize,
+    },
 }
 
 /// Range used for a uniform distribution sample in `Rng::gen_range`: `[low, high)`.
@@ -154,10 +192,25 @@ impl ExclusionSet {
         self.v[node]
     }
 
-    pub fn insert(&mut self, node: Node) {
+    // FIXME: Rename to remove_node (and same with `remove` which
+    // is confusing, it should be restore node).
+    pub fn insert(&mut self, node: Node) -> bool {
         if !self.contains(node) {
             self.v[node] = true;
             self.size += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove(&mut self, node: Node) -> bool {
+        if self.contains(node) {
+            self.v[node] = false;
+            self.size -= 1;
+            true
+        } else {
+            false
         }
     }
 
@@ -202,6 +255,10 @@ impl Graph {
             DRGAlgo::BucketSample => g.bucket_sample(rng),
             DRGAlgo::MetaBucket(degree) => g.meta_bucket(degree, rng),
             DRGAlgo::KConnector(k) => g.connect_neighbors(k),
+            DRGAlgo::UniformGraph {
+                m,
+                ner,
+            } => g.uniform(m, ner),
         }
         g
     }
@@ -267,13 +324,84 @@ impl Graph {
                 {
                     // need the match because there might not be any values
                     Some(depth) => acc.push(depth),
-                    None => acc.push(0),
+                    None => acc.push(1),
                 }
                 acc
             })
             .into_iter()
             .max()
             .unwrap()
+    }
+
+    // Depth of zero means excluded node which we don't connect, depth of one
+    // is a single node, depth of two is an edge.
+    // FIXME: Review the use and usefulness of this function.
+    pub fn depth_exclude_with_edges(&self, set: &ExclusionSet) -> Vec<Edge> {
+        let mut partial_depth = vec![0; self.size()];
+        for child in 0..self.size() {
+            if set.contains(child) {
+                continue;
+            }
+
+            let mut parent_depths = vec![0; self.degree()];
+            for (i, &parent) in self.parents()[child].iter().enumerate() {
+                if set.contains(parent) {
+                    continue;
+                }
+                parent_depths[i] = partial_depth[parent];
+            }
+
+            partial_depth[child] = match parent_depths.iter().max() {
+                Some(max) => *max + 1,
+                None => 1, // No parents, single node, depth of 1.
+            };
+        }
+
+        let depth = *partial_depth.iter().max().unwrap();
+
+        if depth <= 1 {
+            return Vec::new();
+        }
+
+        // Recover the edges, if we have multiple maximums always choose the
+        // first one (for simplicity).
+        // Go back to find the end node of the largest path.
+        let mut path_end = self.size() - 1;
+        loop {
+            if partial_depth[path_end] == depth {
+                break;
+            }
+            path_end -= 1;
+            // We should never be below zero (Rust would take care to panic in that scenario).
+        }
+        assert!(path_end < self.size());
+
+        let mut path = Vec::with_capacity(depth);
+        let mut child = path_end;
+        let mut path_depth = depth;
+        loop {
+            if path_depth <= 1 {
+                break;
+            }
+
+            path_depth -= 1;
+            let mut parent = self.size();
+            for &p in self.parents()[child].iter() {
+                if partial_depth[p] == path_depth {
+                    parent = p;
+                    break;
+                }
+            }
+            assert!(parent < self.size());
+
+            path.push(Edge { parent, child });
+            child = parent;
+        }
+
+        assert_eq!(depth - 1, path.len());
+
+        path.reverse();
+        path
     }
 
     // depth returns the longest depth found in the graph
@@ -513,6 +641,31 @@ impl Graph {
         }
     }
 
+    /// Uniformly set edges of exponentially increasing range.
+    fn uniform(&mut self, m: usize, ner: usize) {
+        self.parents = vec![vec![]; self.size()];
+
+        for node in 1..self.size() {
+            self.parents[node].push(node - 1);
+        }
+
+        let mut interval = ner;
+        for _ in 0..m {
+            let distance = interval + 1;
+            for node in 0..self.size() {
+                if distance > node {
+                    continue;
+                }
+                self.parents[node].push(node - distance);
+            }
+            interval *= ner;
+        }
+
+        // At least the last node should have all the parents or we have chosen a poor
+        // m/ner pair.
+        assert_eq!(self.parents().last().unwrap().len(), m + 1);
+    }
+
     // children_project returns the children edges denoted by this graph
     // instead of using the parent relationship.
     // If j = array[i][u] (for any u), then there is an edge (i -> j) in the graph.
@@ -606,6 +759,10 @@ impl Graph {
             DRGAlgo::BucketSample => 2,
             DRGAlgo::MetaBucket(deg) => deg,
             DRGAlgo::KConnector(d) => d,
+            DRGAlgo::UniformGraph {
+                m,
+                ner: _,
+            } => m,
         }
     }
 
@@ -633,6 +790,10 @@ impl Graph {
     // FIXME: Decide the width based on the `size()` instead
     //  of hard-coding it here to a big number (3).
     pub fn to_str_matrix(&self) -> String {
+        self.to_str_matrix_filtered(None)
+    }
+
+    pub fn to_str_matrix_filtered(&self, s: Option<&ExclusionSet>) -> String {
         let mut matrix = String::new();
         matrix += "\n";
         matrix += format!("{: >3}", "").as_str();
@@ -645,7 +806,9 @@ impl Graph {
             for col in 0..self.size() {
                 matrix += format!(
                     "{: >3}",
-                    if self.parents[col].contains(&row) {
+                    if self.parents[col].contains(&row)
+                        && (s.is_none() || !s.unwrap().contains(row) && !s.unwrap().contains(col))
+                    {
                         "X"
                     } else {
                         ""
@@ -666,6 +829,14 @@ impl fmt::Display for Graph {
             DRGAlgo::BucketSample => write!(f, "bucket, ")?,
             DRGAlgo::MetaBucket(d) => write!(f, "meta-bucket (degree {}), ", d)?,
             DRGAlgo::KConnector(k) => write!(f, "{}-connect, ", k)?,
+            DRGAlgo::UniformGraph {
+                m,
+                ner,
+            } => write!(
+                f,
+                "uniform-{}-m-{}-ner, ",
+                m, ner
+            )?,
         }
         write!(f, "parents: {:?}", self.parents)
     }

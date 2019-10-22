@@ -154,36 +154,34 @@ fn greedy_attacks(n: usize) {
     println!("{}", json);
 }
 
-fn baseline() {
+fn baseline(k: usize, uniform_graph: bool, target_der: f32, runs: usize) {
     println!("Baseline computation for target size [0.10,0.20,0.30]");
+    println!("Size of graph: 2^{}", k);
     let random_bytes = rand::thread_rng().gen::<[u8; 32]>();
-    let n = 20;
-    let size = (2 as usize).pow(n);
+    let size = (2 as usize).pow(k as u32);
     let deg = 6;
     let target_size = (0.30 * size as f64) as usize;
     let spec = GraphSpec {
         size,
         seed: random_bytes,
-        algo: DRGAlgo::MetaBucket(deg),
+        algo: if !uniform_graph {
+            DRGAlgo::MetaBucket(deg)
+        } else {
+            DRGAlgo::UniformGraph {
+                m: deg,
+                ner: target_der.round() as usize,
+            }
+        },
     };
 
-    let greed_params = GreedyParams {
-        k: GreedyParams::k_ratio(n as usize),
-        radius: 4,
-        reset: true,
-        length: 10,
-        iter_topk: true,
-        use_degree: false,
-    };
-
-    let mut profile = AttackProfile::from_attack(
-        DepthReduceSet::GreedyDepth(target_size, greed_params.clone()),
-        size,
-    );
-    profile.runs = 3;
-    profile.range.start = 0.10;
-    profile.range.end = 0.31;
+    let mut profile =
+        AttackProfile::from_attack(DepthReduceSet::ExchangeNodes(target_size, target_der), size);
+    profile.runs = runs;
+    profile.range.start = 0.30;
+    profile.range.end = 0.30;
     profile.range.interval = 0.10;
+    // FIXME: Not enforcing max size at the moment, the attack naturally
+    // stays close to `e = 0.1`.
 
     let res = attack_with_profile(spec, &profile);
     println!("\n\n------------------");
@@ -198,29 +196,56 @@ fn main() {
     let matches = App::new("DRG Attacks")
         .version("1.0")
         .arg(
-            Arg::with_name("size")
-                .short("n")
-                .long("size-n")
+            Arg::with_name("log-size")
+                .short("k")
                 .help("Size of graph expressed as a power of 2")
                 .default_value("10")
                 .takes_value(true),
         )
         .subcommand(SubCommand::with_name("greedy").about("Greedy attack"))
         .subcommand(SubCommand::with_name("porep"))
-        .subcommand(SubCommand::with_name("baseline"))
+        .subcommand(
+            SubCommand::with_name("baseline")
+                .arg(
+                    Arg::with_name("uniform-graph")
+                        .short("u")
+                        .help("use the uniform graph construction instead of the metabucket"),
+                )
+                .arg(
+                    Arg::with_name("runs")
+                        .long("runs")
+                        .short("r")
+                        .default_value("1")
+                        .help("number of runs"),
+                )
+                .arg(
+                    Arg::with_name("target-der")
+                        .long("target-DER")
+                        .short("d")
+                        .default_value("4")
+                        .help(
+                        "total DER expected (actually applied to the NER part, not split for now)",
+                    ),
+                ),
+        )
         .get_matches();
 
-    let n = value_t!(matches, "size", usize).unwrap();
-    assert!(n < 50, "graph size is too big (2^{})", n);
+    let k = value_t!(matches, "log-size", usize).unwrap();
+    assert!(k < 50, "graph size is too big (2^{})", k);
     // FIXME: Use this argument for all attacks, not just Greedy (different
     // attacks may use different default values).
 
     if let Some(_) = matches.subcommand_matches("greedy") {
-        greedy_attacks(n);
+        greedy_attacks(k);
     } else if let Some(_) = matches.subcommand_matches("porep") {
         porep_comparison();
-    } else if let Some(_) = matches.subcommand_matches("baseline") {
-        baseline();
+    } else if let Some(matches) = matches.subcommand_matches("baseline") {
+        baseline(
+            k,
+            matches.is_present("uniform-graph"),
+            value_t!(matches.value_of("target-der"), f32).unwrap(),
+            value_t!(matches.value_of("runs"), usize).unwrap(),
+        );
     } else {
         eprintln!("No subcommand entered, running `porep_comparison`");
         porep_comparison();
