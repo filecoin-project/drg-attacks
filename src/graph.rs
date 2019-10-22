@@ -62,6 +62,10 @@ impl Edge {
         );
         Edge { parent, child }
     }
+
+    pub fn range(&self) -> usize {
+        self.child - self.parent
+    }
 }
 
 /// Faster hasher than the default implementation to speed up hash set use

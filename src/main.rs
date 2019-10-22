@@ -154,11 +154,11 @@ fn greedy_attacks(n: usize) {
     println!("{}", json);
 }
 
-fn baseline() {
+fn baseline(n: usize) {
     println!("Baseline computation for target size [0.10,0.20,0.30]");
+    println!("Size of graph: 2^{}", n);
     let random_bytes = rand::thread_rng().gen::<[u8; 32]>();
-    let n = 20;
-    let size = (2 as usize).pow(n);
+    let size = (2 as usize).pow(n as u32);
     let deg = 6;
     let target_size = (0.30 * size as f64) as usize;
     let spec = GraphSpec {
@@ -167,19 +167,7 @@ fn baseline() {
         algo: DRGAlgo::MetaBucket(deg),
     };
 
-    let greed_params = GreedyParams {
-        k: GreedyParams::k_ratio(n as usize),
-        radius: 4,
-        reset: true,
-        length: 10,
-        iter_topk: true,
-        use_degree: false,
-    };
-
-    let mut profile = AttackProfile::from_attack(
-        DepthReduceSet::GreedyDepth(target_size, greed_params.clone()),
-        size,
-    );
+    let mut profile = AttackProfile::from_attack(DepthReduceSet::UniformAndSkip(target_size), size);
     profile.runs = 3;
     profile.range.start = 0.10;
     profile.range.end = 0.31;
@@ -220,7 +208,7 @@ fn main() {
     } else if let Some(_) = matches.subcommand_matches("porep") {
         porep_comparison();
     } else if let Some(_) = matches.subcommand_matches("baseline") {
-        baseline();
+        baseline(n);
     } else {
         eprintln!("No subcommand entered, running `porep_comparison`");
         porep_comparison();

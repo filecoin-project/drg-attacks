@@ -25,6 +25,9 @@ pub enum DepthReduceSet {
     GreedyDepth(usize, GreedyParams),
     /// Variation of Greedy attack that has as `target` the resulting size of set S.
     GreedySize(usize, GreedyParams),
+    /// PoC attack that removes nodes in a uniform setting skipping zones that are
+    /// covered by edges in a similar range. Has the size of S as target.
+    UniformAndSkip(usize),
 }
 
 pub fn depth_reduce(g: &mut Graph, drs: DepthReduceSet) -> ExclusionSet {
@@ -34,6 +37,7 @@ pub fn depth_reduce(g: &mut Graph, drs: DepthReduceSet) -> ExclusionSet {
         DepthReduceSet::ValiantAB16(_) => valiant_reduce(g, drs),
         DepthReduceSet::GreedyDepth(_, _) => greedy_reduce(g, drs),
         DepthReduceSet::GreedySize(_, _) => greedy_reduce(g, drs),
+        DepthReduceSet::UniformAndSkip(max_size) => uniform_and_skip(g, max_size),
     }
 }
 
@@ -87,6 +91,7 @@ impl AttackProfile {
             DepthReduceSet::ValiantAB16(size) => AttackTarget::Size(size as f64 / graph_size),
             DepthReduceSet::GreedyDepth(depth, _) => AttackTarget::Depth(depth as f64 / graph_size),
             DepthReduceSet::GreedySize(size, _) => AttackTarget::Size(size as f64 / graph_size),
+            DepthReduceSet::UniformAndSkip(size) => AttackTarget::Size(size as f64 / graph_size),
         };
         // FIXME: This code should absorb the `depth_reduce` and derived
         // functions logic. The target discrimination depth/size should
@@ -145,14 +150,18 @@ pub struct AveragedAttackResult {
     target: f64,
     mean_depth: f64,
     mean_size: f64,
+    depth_to_size: f64,
 }
 
 impl AveragedAttackResult {
     pub fn from_results(target: f64, results: &[SingleAttackResult]) -> Self {
         let aggregated: SingleAttackResult = results.iter().sum();
+        let mean_depth = aggregated.depth / results.len() as f64;
+        let mean_size = aggregated.exclusion_size / results.len() as f64;
         AveragedAttackResult {
-            mean_depth: aggregated.depth / results.len() as f64,
-            mean_size: aggregated.exclusion_size / results.len() as f64,
+            mean_depth,
+            mean_size,
+            depth_to_size: (1.0 - mean_depth) / mean_size,
             target: target,
         }
     }
@@ -223,6 +232,9 @@ pub fn attack_with_profile(spec: GraphSpec, profile: &AttackProfile) -> AttackRe
                     DepthReduceSet::GreedyDepth(absolute_target, p)
                 }
                 DepthReduceSet::GreedySize(_, p) => DepthReduceSet::GreedySize(absolute_target, p),
+                DepthReduceSet::UniformAndSkip(_) => {
+                    DepthReduceSet::UniformAndSkip(absolute_target)
+                }
             };
             // FIXME: Same as before, the target should be decoupled from the type of attack.
 
@@ -692,6 +704,43 @@ fn valiant_partitions(g: &Graph) -> Vec<EdgeSet> {
     });
 
     eis
+}
+
+fn uniform_and_skip(graph: &Graph, max_size: usize) -> ExclusionSet {
+    let mut s = ExclusionSet::new(graph);
+    let space = 3;
+
+    let mut covered: Vec<bool> = vec![false; graph.size()];
+    graph.for_each_edge(|e| {
+        if e.range() == space - 1 {
+            // FIXME: Why -1? Think this through. (Calibrated based on results.)
+
+            for i in e.parent..=e.child {
+                // FIXME: Should be inclusive of parent/child? Same as before,
+                //  calibrated based on results.
+
+                covered[i] = true;
+            }
+        }
+    });
+
+    let mut node = 0; // FIXME: Should start from the middle.
+    while s.size() < max_size {
+        if node >= graph.size() {
+            break;
+        }
+
+        if covered[node] {
+            node += 1;
+            // FIXME: We should just jump to the end of this edge,
+            //  son instead of having a Vec<bool> should be a Vec<usize>
+            continue;
+        }
+
+        s.insert(node);
+        node += space;
+    }
+    s
 }
 
 #[cfg(test)]
