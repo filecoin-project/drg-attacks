@@ -412,7 +412,7 @@ impl Graph {
                 // take the depth of each parents + 1 then take the max of it
                 match parents.iter().map(|&p| acc[p] + 1).max() {
                     Some(depth) => acc.push(depth),
-                    None => acc.push(0),
+                    None => acc.push(1),
                 };
                 acc
             })
@@ -942,14 +942,14 @@ pub mod tests {
     #[test]
     fn graph_depth() {
         let p1 = vec![vec![], vec![0], vec![1], vec![2], vec![3]];
-        assert_eq!(graph_from(p1).depth(), 4);
+        assert_eq!(graph_from(p1).depth(), 5);
 
         let p2 = vec![vec![], vec![], vec![0], vec![2], vec![2, 3], vec![3]];
-        assert_eq!(graph_from(p2).depth(), 3);
+        assert_eq!(graph_from(p2).depth(), 4);
 
         let size = 2048;
         let g3 = Graph::new(size, TEST_SEED, DRGAlgo::MetaBucket(3));
-        assert_eq!(g3.depth(), size - 1);
+        assert_eq!(g3.depth(), size);
     }
 
     #[test]
@@ -965,7 +965,7 @@ pub mod tests {
         let p1 = vec![vec![], vec![0], vec![1], vec![2], vec![3]];
         let g1 = graph_from(p1);
         let s = ExclusionSet::from_nodes(&g1, vec![2]);
-        assert_eq!(g1.depth_exclude(&s), 1);
+        assert_eq!(g1.depth_exclude(&s), 2);
 
         let g2 = Graph::new(17, TEST_SEED, DRGAlgo::MetaBucket(3));
         let s = ExclusionSet::from_nodes(&g2, vec![2, 8, 15, 5, 10]);
@@ -976,7 +976,7 @@ pub mod tests {
 
         let size = (2 as usize).pow(10);
         let g3 = Graph::new(size, TEST_SEED, DRGAlgo::MetaBucket(3));
-        assert!(g3.depth() < size);
+        assert!(g3.depth() <= size);
         let ssize = 2 ^ 6;
         let mut rng = ChaChaRng::from_seed(TEST_SEED);
         let mut sv = ExclusionSet::new(&g3);
@@ -993,7 +993,7 @@ pub mod tests {
         // we remove 2->4 and 4->5
         // so max depth is 0->1->2->3->4 = 4 instead of 5
         let p2 = vec![vec![], vec![0], vec![1], vec![2], vec![2, 3], vec![4]];
-        assert_eq!(graph_from(p2.clone()).depth(), 5);
+        assert_eq!(graph_from(p2.clone()).depth(), 6);
         let edges = HashSet::from_iter(vec![Edge::new(2, 4), Edge::new(4, 5)]);
         assert_eq!(graph_from(p2).depth_exclude_edges(&edges), 4);
     }
