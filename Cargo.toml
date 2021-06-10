@@ -23,6 +23,9 @@ rayon = "1.2.0"
 gperftools = "0.2"
 clap = "2.33.0"
 fnv = "1.0.6"
+csv = "1.1"
+sha2 = "0.9"
+blake3 = "0.3.8"
 
 [dev-dependencies]
 criterion = "0.3"

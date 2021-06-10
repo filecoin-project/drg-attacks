@@ -5,4 +5,5 @@ extern crate rayon;
 
 pub mod attacks;
 pub mod graph;
+pub mod results;
 pub mod utils;

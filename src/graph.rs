@@ -1,7 +1,9 @@
 use fnv::FnvHasher;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::error;
@@ -25,6 +27,21 @@ pub struct GraphSpec {
     pub algo: DRGAlgo,
 }
 
+impl fmt::Display for GraphSpec {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "GraphSpec(size: 2^{}, type: ",
+            (self.size as f64).log2() as usize
+        )?;
+        match self.algo {
+            DRGAlgo::BucketSample => write!(f, "bucket)"),
+            DRGAlgo::MetaBucket(d) => write!(f, "meta-bucket (degree {})),", d),
+            DRGAlgo::KConnector(k) => write!(f, "{}-connect)", k),
+            DRGAlgo::Ren21(d) => write!(f, "ren21(degree {})", d),
+        }
+    }
+}
 // Graph holds the parameters and the edges of the graph. This is a special type
 // of graph that has a *proper* labelling: for each edge (i,j), we have i < j.
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,7 +76,9 @@ impl Edge {
     pub fn new(parent: Node, child: Node) -> Edge {
         debug_assert!(
             parent < child,
-            format!("the parent {} is not smaller than child {}", parent, child)
+            "the parent {} is not smaller than child {}",
+            parent,
+            child
         );
         Edge { parent, child }
     }
@@ -87,6 +106,16 @@ pub enum DRGAlgo {
     /// the *closest* ones is just to guarantee that with a regular topology. This
     /// algorithm is mostly for testing purposes.
     KConnector(usize),
+    /// from the non-published-yet "Improved Constructions of Practical Depth-Robust Graphs" from Ren et al.
+    /// Algorithm is a smoothened version of bucket sample; for each node we
+    /// compute the parents in the following way:
+    ///
+    ///    for i ← 1 to dδ log ve do
+    ///        k ←$ [0, log v);
+    ///        E ← E ∪ (v − 2^k , v);
+    ///    end
+    ///
+    Ren21(usize),
 }
 
 /// Range used for a uniform distribution sample in `Rng::gen_range`: `[low, high)`.
@@ -203,6 +232,7 @@ impl Graph {
             DRGAlgo::BucketSample => g.bucket_sample(rng),
             DRGAlgo::MetaBucket(degree) => g.meta_bucket(degree, rng),
             DRGAlgo::KConnector(k) => g.connect_neighbors(k),
+            DRGAlgo::Ren21(degree) => g.ren21(degree),
         }
         g
     }
@@ -242,7 +272,6 @@ impl Graph {
     }
 
     /// Number of nodes in the graph.
-    // FIXME: Standardize size usage, don't access length or capacity of inner structures.
     pub fn size(&self) -> usize {
         self.spec.size
     }
@@ -406,30 +435,48 @@ impl Graph {
     // Implementation of the meta-graph construction algorithm described in page 22
     // of the porep paper https://web.stanford.edu/~bfisch/porep_short.pdf
     // It produces a degree-d graph on average.
-    fn meta_bucket(&mut self, degree: usize, rng: &mut ChaChaRng) {
+    fn meta_bucket(&mut self, degree: usize, _: &mut ChaChaRng) {
         let m = degree - 1;
-        for node in 0..self.parents.capacity() {
-            let mut parents = Vec::with_capacity(degree);
-            match node {
-                // no parents for the first node
-                0 => {}
-                // second node only has the first node as parent
-                1 => {
-                    parents.push(0);
-                }
-                _ => {
-                    // push the direct parent of i, i.e. (i-1 -> i)
-                    parents.push(node - 1);
+        self.parents = (0..self.parents.capacity())
+            .into_par_iter()
+            .map(|node| {
+                let mut parents = match node {
+                    // no parents for the first node
+                    0 => vec![],
+                    // second node only has the first node as parent
+                    1 => {
+                        vec![0]
+                    }
+                    _ => {
+                        (0..degree)
+                            .into_par_iter()
+                            .map(|parent_idx| {
+                                if parent_idx == 0 {
+                                    // push the direct parent of i, i.e. (i-1 -> i)
+                                    return node - 1;
+                                }
+                                //let mut d = Sha256::new();
+                                let mut d = blake3::Hasher::new();
+                                d.update(&self.spec.seed);
+                                d.update(&node.to_be_bytes()[..]);
+                                d.update(&parent_idx.to_be_bytes()[..]);
+                                let digest = d.finalize();
+                                let mut local_seed: [u8; 32] = [0; 32];
+                                local_seed.copy_from_slice(&digest[..]);
+                                let mut local_rng = ChaChaRng::from_seed(local_seed);
 
-                    // similar to bucket_sample but we select m parents instead
-                    // of just one
-                    parents.extend((0..m).map(|_| Self::sample_parent_node(node, m, rng).0));
-                }
-            }
-            // filtering duplicate parents
-            remove_duplicate(&mut parents);
-            self.parents.push(parents);
-        }
+                                // similar to bucket_sample but we select m parents instead
+                                // of just one
+                                Self::sample_parent_node(node, m, &mut local_rng).0
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                };
+                // filtering duplicate parents
+                remove_duplicate(&mut parents);
+                parents
+            })
+            .collect::<Vec<_>>();
     }
 
     /// Core of the meta-graph construction (`meta_bucket`) isolated for audit and
@@ -488,6 +535,48 @@ impl Graph {
         )
     }
 
+    fn ren21(&mut self, degree: usize) {
+        self.parents = (0..self.parents.capacity())
+            .into_par_iter()
+            .map(|node| {
+                let log_node = (node as f64).log2();
+                let mut parents = match node {
+                    0 => vec![],
+                    1 => vec![0],
+                    _ => {
+                        (0..degree)
+                            .into_par_iter()
+                            .map(|parent_idx| {
+                                if parent_idx == 0 {
+                                    // include parent
+                                    return node - 1;
+                                }
+                                //let mut d = Sha256::new();
+                                let mut d = blake3::Hasher::new();
+                                d.update(&self.spec.seed);
+                                d.update(&node.to_be_bytes()[..]);
+                                d.update(&parent_idx.to_be_bytes()[..]);
+                                let digest = d.finalize();
+                                let mut local_seed: [u8; 32] = [0; 32];
+                                local_seed.copy_from_slice(&digest[..]);
+                                let mut local_rng = ChaChaRng::from_seed(local_seed);
+                                // random [0,log(v) [
+                                let k = local_rng.gen_range(0 as f64, log_node);
+                                // Edge( v - floor(2^k), v)
+                                let twok = k.exp2();
+                                let twokf = twok.floor() as usize;
+                                assert!(twokf < node);
+                                node - twokf
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                };
+                remove_duplicate(&mut parents);
+                parents
+            })
+            .collect::<Vec<_>>();
+    }
+
     /// Connect to `k` closest neighbors (see `KConnector`).
     fn connect_neighbors(&mut self, k: usize) {
         // FIXME: Let the algorithms initialize the slices instead of working
@@ -495,17 +584,15 @@ impl Graph {
         // let parents = vec![vec![]; self.size()];
         // FIXME: How to set the capacity for the inner empty vector to `k`?
 
-        debug_assert!(k > 0, format!("k {} is too small", k));
+        debug_assert!(k > 0, "k {} is too small", k);
 
         // Check that the graph is big enough to accommodate k connections
         // at least in the center
         debug_assert!(
             self.size() - 2 * k > 0,
-            format!(
-                "the graph of size {} is too small for a k {}",
-                self.size(),
-                k
-            )
+            "the graph of size {} is too small for a k {}",
+            self.size(),
+            k
         );
 
         for node in 0..self.size() {
@@ -607,6 +694,7 @@ impl Graph {
             DRGAlgo::BucketSample => 2,
             DRGAlgo::MetaBucket(deg) => deg,
             DRGAlgo::KConnector(d) => d,
+            DRGAlgo::Ren21(d) => d,
         }
     }
 
@@ -667,6 +755,7 @@ impl fmt::Display for Graph {
             DRGAlgo::BucketSample => write!(f, "bucket, ")?,
             DRGAlgo::MetaBucket(d) => write!(f, "meta-bucket (degree {}), ", d)?,
             DRGAlgo::KConnector(k) => write!(f, "{}-connect, ", k)?,
+            DRGAlgo::Ren21(d) => write!(f, "ren21(degree {})", d)?,
         }
         write!(f, "parents: {:?}", self.parents)
     }
@@ -826,6 +915,27 @@ pub mod tests {
         assert_eq!(graph_from(p2.clone()).depth(), 5);
         let edges = HashSet::from_iter(vec![Edge::new(2, 4), Edge::new(4, 5)]);
         assert_eq!(graph_from(p2).depth_exclude_edges(&edges), 4);
+    }
+
+    #[test]
+    fn graph_ren21() {
+        let degree = 5;
+        let size = 1 << 13;
+        let ren21 = Graph::new(size, TEST_SEED, DRGAlgo::Ren21(degree));
+        let nb_parents = ren21
+            .parents()
+            .iter()
+            .enumerate()
+            .skip(1)
+            .inspect(|(node, parents)| {
+                assert!(parents.contains(&(node - 1)));
+            })
+            .map(|(_, parents)| parents.len())
+            .collect::<Vec<_>>();
+        let mean_parents = mean(&nb_parents).unwrap();
+        println!("Ren21({}) -> mean parents {}", degree, mean_parents);
+        assert!(degree as f32 - 0.5 < mean_parents);
+        assert!(degree as f32 + 0.5 > mean_parents);
     }
 
     #[test]

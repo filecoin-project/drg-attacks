@@ -5,19 +5,19 @@ use log::{debug, trace};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::graph::{EdgeSet, ExclusionSet, Graph, GraphSpec, Node, NodeSet};
+use crate::results::{AttackResults, AveragedAttackResult, SingleAttackResult};
 use crate::utils;
 use rayon::prelude::*;
 
-// FIXME: This name is no longer representative, we no longer attack using
-//  depth as a target, we also have a size target now. This should be renamed
-//  to something more generic like `AttackType`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DepthReduceSet {
+pub enum AttackAlgo {
     /// depth of the resulting G-S graph desired
     ValiantDepth(usize),
-    /// size of the resulting S desired
+    /// size of the resulting exclusion set S desired - the size of the graph
+    /// that we REMOVE from the original graph where we compute the final depth.
     ValiantSize(usize),
     /// AB16 Lemma 6.2 variant of the Valiant Lemma's based attack.
     /// Parameter  is size of the resulting G-S graph desired
@@ -28,27 +28,26 @@ pub enum DepthReduceSet {
     GreedySize(usize, GreedyParams),
 }
 
-pub fn depth_reduce(g: &mut Graph, drs: DepthReduceSet) -> ExclusionSet {
+pub fn depth_reduce(g: &mut Graph, drs: AttackAlgo) -> ExclusionSet {
     match drs {
-        DepthReduceSet::ValiantDepth(_) => valiant_reduce(g, drs),
-        DepthReduceSet::ValiantSize(_) => valiant_reduce(g, drs),
-        DepthReduceSet::ValiantAB16(_) => valiant_reduce(g, drs),
-        DepthReduceSet::GreedyDepth(_, _) => greedy_reduce(g, drs),
-        DepthReduceSet::GreedySize(_, _) => greedy_reduce(g, drs),
+        AttackAlgo::ValiantDepth(_) => valiant_reduce(g, drs),
+        AttackAlgo::ValiantSize(_) => valiant_reduce(g, drs),
+        AttackAlgo::ValiantAB16(_) => valiant_reduce(g, drs),
+        AttackAlgo::GreedyDepth(_, _) => greedy_reduce(g, drs),
+        AttackAlgo::GreedySize(_, _) => greedy_reduce(g, drs),
     }
 }
 
-/// Target of an attack, either the depth should be smaller than `Depth` or
-/// the exclusion set `S` should have a size bigger than `Size` (actually
-/// we want to hit a target as close as possible as those thresholds). All
-/// targets are specified in relation to the size of the graph `G` (not to
-/// be confused with the target size of set `S`).
-// FIXME: Overlapping with `DepthReduceSet` internal values, this should
-//  replace that.
-#[derive(Debug)]
-pub enum AttackTarget {
-    Depth(f64),
-    Size(f64),
+impl fmt::Display for AttackAlgo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AttackAlgo::ValiantDepth(s) => write!(f, "ValiantDepth: path length {}", s),
+            AttackAlgo::ValiantSize(s) => write!(f, "ValiantSize: exclusion set size {}", s),
+            AttackAlgo::ValiantAB16(s) => write!(f, "ValiantAB16: graph remaining target {}", s),
+            AttackAlgo::GreedyDepth(s, _) => write!(f, "GreedyDepth: path length {}", s),
+            AttackAlgo::GreedySize(s, _) => write!(f, "GreedySize: exclusion set size {}", s),
+        }
+    }
 }
 
 /// Range of targets to try (to find the optimum value) from `start`, increasing
@@ -68,9 +67,8 @@ pub struct TargetRange {
 #[derive(Debug)]
 pub struct AttackProfile {
     pub runs: usize,
-    pub target: AttackTarget,
     pub range: TargetRange,
-    pub attack: DepthReduceSet,
+    pub attack: AttackAlgo,
 }
 
 impl AttackProfile {
@@ -80,112 +78,37 @@ impl AttackProfile {
     // FIXME: We shouldn't need the `graph_size` (or the graph for that
     // matter), but this is accommodating previous uses of `attack` (which
     // should be refactored entirely and this method removed or reworked).
-    pub fn from_attack(attack: DepthReduceSet, graph_size: usize) -> Self {
+    pub fn from_attack(attack: AttackAlgo, graph_size: usize) -> Self {
         let graph_size = graph_size as f64;
         let target = match attack {
-            DepthReduceSet::ValiantDepth(depth) => AttackTarget::Depth(depth as f64 / graph_size),
-            DepthReduceSet::ValiantSize(size) => AttackTarget::Size(size as f64 / graph_size),
-            DepthReduceSet::ValiantAB16(size) => AttackTarget::Size(size as f64 / graph_size),
-            DepthReduceSet::GreedyDepth(depth, _) => AttackTarget::Depth(depth as f64 / graph_size),
-            DepthReduceSet::GreedySize(size, _) => AttackTarget::Size(size as f64 / graph_size),
+            AttackAlgo::ValiantDepth(depth) => depth as f64 / graph_size,
+            AttackAlgo::ValiantSize(size) => size as f64 / graph_size,
+            AttackAlgo::ValiantAB16(size) => size as f64 / graph_size,
+            AttackAlgo::GreedyDepth(depth, _) => depth as f64 / graph_size,
+            AttackAlgo::GreedySize(size, _) => size as f64 / graph_size,
         };
         // FIXME: This code should absorb the `depth_reduce` and derived
         // functions logic. The target discrimination depth/size should
         // b independent of the attack type (valiant/greedy).
 
         let range = {
-            let single_value = match target {
-                AttackTarget::Depth(depth) => depth,
-                AttackTarget::Size(size) => size,
-            };
             // FIXME: Too verbose, there probably is a more concise way to do this.
             TargetRange {
-                start: single_value,
-                end: single_value,
+                start: target,
+                end: target,
                 interval: 0.0,
             }
         };
 
         AttackProfile {
             runs: 1,
-            target,
             range,
             attack,
         }
     }
 }
 
-/// Results of an attack expressed in relation to the graph size.
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
-pub struct SingleAttackResult {
-    depth: f64,
-    exclusion_size: f64,
-    // graph_size: usize,
-    // FIXME: Do we care to know the absolute number or just
-    // relative to the graph size?
-}
-
-impl<'a> std::iter::Sum<&'a Self> for SingleAttackResult {
-    fn sum<I>(iter: I) -> Self
-    where
-        I: Iterator<Item = &'a Self>,
-    {
-        iter.fold(SingleAttackResult::default(), |a, b| SingleAttackResult {
-            depth: a.depth + b.depth,
-            exclusion_size: a.exclusion_size + b.exclusion_size,
-        })
-    }
-}
-
-/// Average of many `SingleAttackResult`s.
-// FIXME: Should be turn into a more generalized structure that also
-//  has the variance along with the mean using a specialized crate.
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
-pub struct AveragedAttackResult {
-    // for log/output purpose
-    target: f64,
-    mean_depth: f64,
-    mean_size: f64,
-}
-
-impl AveragedAttackResult {
-    pub fn from_results(target: f64, results: &[SingleAttackResult]) -> Self {
-        let aggregated: SingleAttackResult = results.iter().sum();
-        AveragedAttackResult {
-            mean_depth: aggregated.depth / results.len() as f64,
-            mean_size: aggregated.exclusion_size / results.len() as f64,
-            target: target,
-        }
-    }
-}
-
-/// Struct containing all informations about the attack runs. It can be
-/// serialized into JSON or other format with serde.
-#[derive(Serialize, Deserialize)]
-pub struct Results {
-    attacks: Vec<AttackResults>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct AttackResults {
-    spec: GraphSpec,
-    // number of runs to average out the results
-    runs: usize,
-    attack: DepthReduceSet,
-    results: Vec<AveragedAttackResult>,
-}
-
-impl std::fmt::Display for SingleAttackResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "\t-> |S| = {:.6}\n\t-> depth(G-S) = {:.6}",
-            self.exclusion_size, self.depth,
-        )
-    }
-}
-
-pub fn attack(g: &mut Graph, attack: DepthReduceSet) -> SingleAttackResult {
+pub fn attack(g: &mut Graph, attack: AttackAlgo) -> SingleAttackResult {
     let start = Instant::now();
     let set = depth_reduce(g, attack);
     let duration = start.elapsed();
@@ -220,25 +143,23 @@ pub fn attack_with_profile(spec: GraphSpec, profile: &AttackProfile) -> AttackRe
     // graph once we attacked it with all targets.
     let mut rng = ChaCha20Rng::from_seed(spec.seed);
     for run in 0..profile.runs {
+        println!(
+            "Attack {}:\n\t-> Graph generation with spec {}",
+            run,
+            spec.clone()
+        );
         let mut g = Graph::new_from_rng(spec, &mut rng);
 
         for (t, target) in targets.iter().enumerate() {
             let absolute_target = (target * spec.size as f64) as usize;
             let attack_type = match profile.attack.clone() {
-                DepthReduceSet::ValiantDepth(_) => DepthReduceSet::ValiantDepth(absolute_target),
-                DepthReduceSet::ValiantSize(_) => DepthReduceSet::ValiantSize(absolute_target),
-                DepthReduceSet::ValiantAB16(_) => DepthReduceSet::ValiantAB16(absolute_target),
-                DepthReduceSet::GreedyDepth(_, p) => {
-                    DepthReduceSet::GreedyDepth(absolute_target, p)
-                }
-                DepthReduceSet::GreedySize(_, p) => DepthReduceSet::GreedySize(absolute_target, p),
+                AttackAlgo::ValiantDepth(_) => AttackAlgo::ValiantDepth(absolute_target),
+                AttackAlgo::ValiantSize(_) => AttackAlgo::ValiantSize(absolute_target),
+                AttackAlgo::ValiantAB16(_) => AttackAlgo::ValiantAB16(absolute_target),
+                AttackAlgo::GreedyDepth(_, p) => AttackAlgo::GreedyDepth(absolute_target, p),
+                AttackAlgo::GreedySize(_, p) => AttackAlgo::GreedySize(absolute_target, p),
             };
-            // FIXME: Same as before, the target should be decoupled from the type of attack.
-
-            println!(
-                "Attack (run {}) target ({:?} = {}), with {:?}",
-                run, profile.target, target, attack_type
-            );
+            println!("\t-> Run target attack {:.2}, with {}", attack_type, target);
             results[t][run] = attack(&mut g, attack_type.clone());
         }
     }
@@ -257,6 +178,22 @@ pub fn attack_with_profile(spec: GraphSpec, profile: &AttackProfile) -> AttackRe
 
 // GreedyParams holds the different parameters to choose for the greedy algorithm
 // such as the radius from which to delete nodes and the heuristic length.
+// NOTE: degree**radius/size should be small, i.e. if it's too big the
+// radiuis set will quickly contains all the nodes so there won't be any new
+// nodesto add to the exclusion set (we don't take nodes included radius to the
+// exclusion set). 5-30% should be fine.
+// The topk parameters determines how much steps roughy the algorithm will take
+// numbers of steps ~= size / topk  (assuming the radius doesn't take every
+// nodes at some points in the computation, at which point we will include much
+// less than topk nodes at each iteration; this would happen once the G-S
+// becomes small).
+// TODO: the topk parameters and radius should evolve gradually through time and
+// not be fixed. In particular, radius should become smaller and smaller as
+// G-S becomes smaller and smaller. If topk is small enough it doesn't need to
+// change, but it should never be a high proportion of the graph size (50%)
+// because including 50% of nodes in one step will give less precise results as
+// well. Option to explore as this is likely to give better results but worse
+// performance as well.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GreedyParams {
     // how many k nodes do we "remove" at each iteration in append_removal
@@ -284,21 +221,36 @@ pub struct GreedyParams {
 }
 
 impl GreedyParams {
-    pub fn k_ratio(size: usize) -> usize {
-        assert!(size >= 20);
-        (2 as usize).pow((size as u32 - 18) / 2) * 400
+    // TODO find better formulas/rational
+    pub fn k_ratio(log2n: usize) -> usize {
+        if log2n >= 20 {
+            (2 as usize).pow((log2n as u32 - 18) / 2) * 400
+        } else {
+            (1 << log2n) / 10
+        }
+    }
+    pub fn standard(size: usize) -> Self {
+        GreedyParams {
+            k: Self::k_ratio(size),
+            radius: 8,
+            length: 16,
+            reset: true,
+            iter_topk: true,
+            parallel: true,
+            ..GreedyParams::default()
+        }
     }
 }
 
 // greedy_reduce implements the Algorithm 5 of https://eprint.iacr.org/2018/944.pdf
-fn greedy_reduce(g: &mut Graph, d: DepthReduceSet) -> ExclusionSet {
+fn greedy_reduce(g: &mut Graph, d: AttackAlgo) -> ExclusionSet {
     match d {
-        DepthReduceSet::GreedyDepth(depth, p) => {
+        AttackAlgo::GreedyDepth(depth, p) => {
             greedy_reduce_main(g, p, &|set: &ExclusionSet, g: &mut Graph| {
                 g.depth_exclude(set) > depth
             })
         }
-        DepthReduceSet::GreedySize(size, p) => {
+        AttackAlgo::GreedySize(size, p) => {
             // FIXME: To hit exactly the `target_size` we should consider the number of nodes
             //  removed in each iteration (`GreedyParams::k`), but since that number is small
             //  compared to normal target sizes it is an acceptable bias for now. We only
@@ -308,7 +260,7 @@ fn greedy_reduce(g: &mut Graph, d: DepthReduceSet) -> ExclusionSet {
 
             greedy_reduce_main(g, p, &|set: &ExclusionSet, _: &mut Graph| set.size() < size)
         }
-        _ => panic!("invalid DepthReduceSet option"),
+        _ => panic!("invalid AttackAlgo option"),
     }
 }
 
@@ -324,7 +276,11 @@ fn greedy_reduce_main(
         // TODO use p.length when more confidence in the trick
         let incidents = count_paths(g, &s, &p);
         append_removal(g, &mut s, &mut inradius, &incidents, &p);
-
+        debug!(
+            "\t-> greedy step: exclusion set len {}, inradius len {}",
+            s.size(),
+            inradius.len()
+        );
         // TODO
         // 1. Find what should be the normal behavior: clearing or continue
         // updating the inradius set
@@ -363,6 +319,10 @@ fn append_removal(
             // optim to add as much as possible nodes: goal is to add
             // as much as possible k nodes to S in each iteration.
             if count == k {
+                trace!(
+                    "\t\t- iteration on incidence included k nodes in radius
+                -break!!"
+                );
                 break;
             }
         } else if count + excluded == k {
@@ -375,14 +335,21 @@ fn append_removal(
             // difference with previous insertion is that we only include
             // nodes NOT in the radius set
             excluded += 1;
+            trace!(
+                "\t\t-- node {} included already in radius (len {})- skip to include in
+            radius",
+                node.0,
+                inradius.len()
+            );
             continue;
         }
         set.insert(node.0);
         update_radius_set(g, node.0, inradius, params);
         count += 1;
-        debug!(
-            "\t-> iteration {} : node {} inserted -> inradius {:?}",
-            count + excluded,
+        trace!(
+            "\t-> iteration {}: {} new node inserted ({} excluded) -> inradius {:?}",
+            count,
+            excluded,
             node.0,
             inradius.len(),
         );
@@ -396,7 +363,7 @@ fn append_removal(
     // algorithm, we still add one ( so we can have a different inradius at the
     // next iteration).
     if count == 0 {
-        debug!("\t-> added by default one node {}", incidents[0].0);
+        debug!("\t\t-> added by default one node {}", incidents[0].0);
         set.insert(incidents[0].0);
         if !params.reset {
             update_radius_set(g, incidents[0].0, inradius, params);
@@ -404,47 +371,22 @@ fn append_removal(
         count += 1;
     }
 
-    let d = g.depth_exclude(&set);
     debug!(
-        "\t-> added {}/{} nodes in |S| = {}, depth(G-S) = {} = {:.3}n",
+        "\t-> added {}/{} nodes in |S| = {:.2}, depth(G-S) =  {:.3}n",
         count,
         k,
         set.size(),
-        d,
-        (d as f32) / (g.cap() as f32),
+        (g.depth_exclude(&set) as f32) / (g.cap() as f32),
     );
 }
 
-fn add_direct_nodes(g: &Graph, v: usize, rad: &NodeSet, mut f: impl FnMut(usize)) {
-    // add all direct parent
-    g.parents()[v]
-        .iter()
-        // no need to continue searching with that parent since it's
-        // already in the radius, i.e. it already has been searched
-        // FIXME see if it works and resolves any potential loops
-        .filter(|&parent| !rad.contains(parent))
-        .for_each(|&parent| {
-            f(parent);
-            //closests.insert(parent);
-        });
-
-    // add all direct children
-    g.children()[v]
-        .iter()
-        // no need to continue searching with that parent since it's
-        // already in the radius, i.e. it already has been searched
-        .filter(|&child| !rad.contains(child))
-        .for_each(|&child| {
-            //closests.insert(child);
-            f(child);
-        });
-    trace!(
-        "\t add_direct node {}: at most {} parents and {} children",
-        v,
-        g.parents()[v].len(),
-        g.children()[v].len()
-    );
-    //closests
+fn compute_direct_nodes(g: &Graph, v: usize, rad: &NodeSet) -> Vec<usize> {
+    return g.parents()[v]
+        .par_iter()
+        .chain(g.children()[v].par_iter())
+        .filter(|&node| !rad.contains(node))
+        .cloned()
+        .collect::<Vec<usize>>();
 }
 
 /// update_radius_set fills the given inradius set with nodes that inside a radius
@@ -475,9 +417,9 @@ pub fn update_radius_set(g: &Graph, node: usize, inradius: &mut NodeSet, p: &Gre
                 .fold(
                     || Vec::new(),
                     |mut acc, idx| {
-                        add_direct_nodes(g, *idx, inradius, |x| {
-                            acc.push(x);
-                        });
+                        compute_direct_nodes(g, *idx, inradius)
+                            .into_iter()
+                            .for_each(|x| acc.push(x));
                         acc
                     },
                 )
@@ -495,9 +437,9 @@ pub fn update_radius_set(g: &Graph, node: usize, inradius: &mut NodeSet, p: &Gre
             closests.clear();
             // grab all direct nodes of those already in radius "i"
             for &v in tosearch.iter() {
-                add_direct_nodes(g, v, inradius, |x| {
-                    closests.push(x);
-                });
+                compute_direct_nodes(g, v, inradius)
+                    .into_iter()
+                    .for_each(|x| closests.push(x));
             }
             closests
         };
@@ -548,17 +490,19 @@ pub fn count_paths(g: &Graph, s: &ExclusionSet, p: &GreedyParams) -> Vec<Pair> {
     }
     let length = p.length;
     // dimensions are [n][depth]
-    let mut ending_paths = vec![vec![0 as u64; length + 1]; g.cap()];
-    let mut starting_paths = vec![vec![0 as u64; length + 1]; g.cap()];
     // counting phase of all starting/ending paths of all length
-
-    for node in 0..g.size() {
-        if !s.contains(node) {
-            // initializes the tables with 1 for nodes present in G - S
-            ending_paths[node][0] = 1;
-            starting_paths[node][0] = 1;
-        }
-    }
+    let (mut ending_paths, mut starting_paths): (Vec<Vec<u64>>, Vec<Vec<u64>>) = (0..g.size())
+        .into_par_iter()
+        .map(|node| {
+            let mut ending_paths = vec![0 as u64; length + 1];
+            let mut starting_paths = vec![0 as u64; length + 1];
+            if !s.contains(node) {
+                ending_paths[0] = 1;
+                starting_paths[0] = 1;
+            }
+            (ending_paths, starting_paths)
+        })
+        .unzip();
 
     for d in 1..=length {
         g.for_each_edge(|e| {
@@ -583,6 +527,7 @@ pub fn count_paths(g: &Graph, s: &ExclusionSet, p: &GreedyParams) -> Vec<Pair> {
         Pair(
             node,
             (0..=length)
+                .into_par_iter()
                 .map(|d| (starting_paths[node][d] * ending_paths[node][length - d]) as usize)
                 .sum(),
         )
@@ -701,17 +646,17 @@ fn valiant_ab16(g: &Graph, target: usize) -> ExclusionSet {
     return s;
 }
 
-fn valiant_reduce(g: &Graph, d: DepthReduceSet) -> ExclusionSet {
+fn valiant_reduce(g: &Graph, d: AttackAlgo) -> ExclusionSet {
     match d {
         // valiant_reduce returns a set S such that depth(G - S) < target.
         // It implements the algo 8 in the https://eprint.iacr.org/2018/944.pdf paper.
-        DepthReduceSet::ValiantDepth(depth) => {
+        AttackAlgo::ValiantDepth(depth) => {
             valiant_reduce_main(g, &|set: &ExclusionSet| g.depth_exclude(set) > depth)
         }
-        DepthReduceSet::ValiantSize(size) => {
+        AttackAlgo::ValiantSize(size) => {
             valiant_reduce_main(g, &|set: &ExclusionSet| set.size() < size)
         }
-        DepthReduceSet::ValiantAB16(depth) => valiant_ab16(g, depth),
+        AttackAlgo::ValiantAB16(depth) => valiant_ab16(g, depth),
         _ => panic!("that should not happen"),
     }
 }
@@ -817,7 +762,7 @@ mod test {
             length: 2,
             ..GreedyParams::default()
         };
-        let s = greedy_reduce(&mut graph, DepthReduceSet::GreedyDepth(2, params));
+        let s = greedy_reduce(&mut graph, AttackAlgo::GreedyDepth(2, params));
         assert_eq!(s, ExclusionSet::from_nodes(&graph, vec![3, 4]));
         let params = GreedyParams {
             k: 1,
@@ -826,7 +771,7 @@ mod test {
             reset: true,
             ..GreedyParams::default()
         };
-        let s = greedy_reduce(&mut graph, DepthReduceSet::GreedyDepth(2, params));
+        let s = greedy_reduce(&mut graph, AttackAlgo::GreedyDepth(2, params));
         // + incidents [Pair(2, 7), Pair(4, 7), Pair(3, 6), Pair(0, 5), Pair(1, 5), Pair(5, 3)]
         //         -> iteration 1 : node 2 inserted -> inradius {0, 3, 1, 2, 4}
         //         -> added 1/6 nodes in |S| = 1, depth(G-S) = 4 = 0.667n
@@ -843,7 +788,7 @@ mod test {
             length: 2,
             ..GreedyParams::default()
         };
-        let s = greedy_reduce(&mut graph, DepthReduceSet::GreedyDepth(2, params));
+        let s = greedy_reduce(&mut graph, AttackAlgo::GreedyDepth(2, params));
         // iteration 1: incidents [Pair(2, 7), Pair(4, 7), Pair(3, 6), Pair(0, 5), Pair(1, 5), Pair(5, 3)]
         // -> iteration 1 : node 2 inserted -> inradius {0, 3, 1, 4, 2}
         // -> added 1/1 nodes in |S| = 1, depth(G-S) = 4 = 0.667n
@@ -866,11 +811,11 @@ mod test {
             use_degree: false,
             parallel: false,
         };
-        let set1 = greedy_reduce(&mut g3, DepthReduceSet::GreedyDepth(depth, params.clone()));
+        let set1 = greedy_reduce(&mut g3, AttackAlgo::GreedyDepth(depth, params.clone()));
 
         assert!(g3.depth_exclude(&set1) < depth);
         params.use_degree = true;
-        let set2 = greedy_reduce(&mut g3, DepthReduceSet::GreedyDepth(depth, params.clone()));
+        let set2 = greedy_reduce(&mut g3, AttackAlgo::GreedyDepth(depth, params.clone()));
         assert!(g3.depth_exclude(&set2) < depth);
     }
 
@@ -1023,14 +968,14 @@ mod test {
     #[test]
     fn test_valiant_reduce_depth() {
         let graph = graph::tests::graph_from(TEST_PARENTS.to_vec());
-        let set = valiant_reduce(&graph, DepthReduceSet::ValiantDepth(2));
+        let set = valiant_reduce(&graph, AttackAlgo::ValiantDepth(2));
         assert_eq!(set, ExclusionSet::from_nodes(&graph, vec![0, 2, 3, 4, 6]));
     }
 
     #[test]
     fn test_valiant_reduce_size() {
         let graph = graph::tests::graph_from(TEST_PARENTS.to_vec());
-        let set = valiant_reduce(&graph, DepthReduceSet::ValiantSize(3));
+        let set = valiant_reduce(&graph, AttackAlgo::ValiantSize(3));
         assert_eq!(set, ExclusionSet::from_nodes(&graph, vec![0, 2, 3, 4, 6]));
     }
 
@@ -1049,7 +994,7 @@ mod test {
 
         let g = graph::tests::graph_from(parents);
         let target = 4;
-        let set = valiant_reduce(&g, DepthReduceSet::ValiantAB16(target));
+        let set = valiant_reduce(&g, AttackAlgo::ValiantAB16(target));
         assert!(g.depth_exclude(&set) < target);
         // 3->4 differs at 3rd bit and they're the only one differing at that bit
         // so set s contains origin node 3
@@ -1057,7 +1002,7 @@ mod test {
 
         let g = Graph::new(TEST_SIZE, graph::tests::TEST_SEED, DRGAlgo::MetaBucket(2));
         let target = TEST_SIZE / 4;
-        let set = valiant_reduce(&g, DepthReduceSet::ValiantAB16(target));
+        let set = valiant_reduce(&g, AttackAlgo::ValiantAB16(target));
         assert!(g.depth_exclude(&set) <= target);
     }
 
